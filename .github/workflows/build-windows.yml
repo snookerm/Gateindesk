@@ -75,16 +75,30 @@ jobs:
           RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
         run: |
           cd rustdesk
-          # Escape for sed: any /, |, & in values is unlikely but just in case use pipe delimiter
-          sed -i "s|\"rs-ny.rustdesk.com\"|\"${RENDEZVOUS_SERVER}\"|g" libs/hbb_common/src/config.rs
-          sed -i "s|\"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\"|\"${RS_PUB_KEY}\"|g" libs/hbb_common/src/config.rs
-          # Do NOT echo the patched values to stdout (would leak in build log)
-          # Just verify substitution count
-          server_count=$(grep -c "${RENDEZVOUS_SERVER}" libs/hbb_common/src/config.rs || true)
-          key_count=$(grep -c "${RS_PUB_KEY}" libs/hbb_common/src/config.rs || true)
-          [ "$server_count" -ge 1 ] || { echo "::error::server patch failed"; exit 1; }
-          [ "$key_count" -ge 1 ] || { echo "::error::key patch failed"; exit 1; }
-          echo "config.rs patched OK"
+          python3 - <<'PY'
+          import os, pathlib, sys
+          p = pathlib.Path('libs/hbb_common/src/config.rs')
+          src = p.read_text()
+          # strip() handles trailing newlines/whitespace that may sneak in via
+          # copy-paste into GitHub secrets UI
+          server = os.environ['RENDEZVOUS_SERVER'].strip()
+          pubkey = os.environ['RS_PUB_KEY'].strip()
+          patched = src.replace('"rs-ny.rustdesk.com"', f'"{server}"')
+          if patched == src:
+              print('::error::RENDEZVOUS_SERVERS substitution did not change config.rs', file=sys.stderr)
+              sys.exit(1)
+          src = patched
+          patched = src.replace(
+              '"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw="',
+              f'"{pubkey}"',
+          )
+          if patched == src:
+              print('::error::RS_PUB_KEY substitution did not change config.rs', file=sys.stderr)
+              sys.exit(1)
+          p.write_text(patched)
+          # report only LENGTHS, not values (avoid leaking into build log)
+          print(f'config.rs patched OK (server={len(server)}c, key={len(pubkey)}c)')
+          PY
 
       - name: Download GateInDesk branding
         shell: bash
@@ -92,6 +106,8 @@ jobs:
           BRANDING_URL: ${{ secrets.BRANDING_URL }}
         run: |
           cd rustdesk
+          # Strip whitespace and trailing slash from secret
+          BRANDING_URL=$(printf '%s' "$BRANDING_URL" | tr -d '[:space:]' | sed 's:/*$::')
           curl -fsSL -o flutter/assets/logo.png "${BRANDING_URL}/icon-300.png"
           curl -fsSL -o res/icon.ico "${BRANDING_URL}/icon.ico"
           curl -fsSL -o flutter/windows/runner/resources/app_icon.ico "${BRANDING_URL}/icon.ico" || true
