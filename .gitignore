@@ -1,0 +1,17 @@
+# Build artifacts
+rustdesk/
+upstream-source/
+build/
+dist/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Secrets
+*.env
+*.pem
+*.key

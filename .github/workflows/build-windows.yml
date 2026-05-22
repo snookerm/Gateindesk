@@ -1,0 +1,203 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload-tag:
+        description: 'Release tag (e.g. nightly, v1.0.0)'
+        type: string
+        default: 'nightly'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE*'
+
+env:
+  RUSTDESK_REV: "1.4.6"
+  FLUTTER_VERSION: "3.24.5"
+  RUST_VERSION: "1.75"
+  LLVM_VERSION: "15.0.6"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  APP_NAME: "GateInDesk"
+  TAG_NAME: "${{ inputs.upload-tag || 'nightly' }}"
+
+  # Deployment-specific values come from repository secrets:
+  #   RENDEZVOUS_SERVER  e.g. some.host.example
+  #   RS_PUB_KEY         server public key (ed25519, base64)
+  #   BRANDING_URL       base URL where icon-300.png / icon.ico are hosted
+
+jobs:
+  build-windows:
+    name: GateInDesk Windows x86_64
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Validate required secrets are set
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+          BRANDING_URL: ${{ secrets.BRANDING_URL }}
+        run: |
+          missing=0
+          [ -z "$RENDEZVOUS_SERVER" ] && { echo "::error::secret RENDEZVOUS_SERVER not set"; missing=1; }
+          [ -z "$RS_PUB_KEY" ] && { echo "::error::secret RS_PUB_KEY not set"; missing=1; }
+          [ -z "$BRANDING_URL" ] && { echo "::error::secret BRANDING_URL not set"; missing=1; }
+          [ "$missing" = "1" ] && { echo "Add secrets in Settings → Secrets and variables → Actions"; exit 1; }
+          echo "all secrets present"
+
+      - name: Checkout meta-repo
+        uses: actions/checkout@v4
+        with:
+          path: meta
+
+      - name: Export Actions cache env
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Clone upstream rustdesk + submodules
+        shell: bash
+        run: |
+          git clone --depth=1 --branch=${RUSTDESK_REV} https://github.com/rustdesk/rustdesk.git rustdesk
+          cd rustdesk
+          git submodule update --init --recursive --depth=1
+
+      - name: Patch config.rs (server + pub key) from secrets
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          cd rustdesk
+          # Escape for sed: any /, |, & in values is unlikely but just in case use pipe delimiter
+          sed -i "s|\"rs-ny.rustdesk.com\"|\"${RENDEZVOUS_SERVER}\"|g" libs/hbb_common/src/config.rs
+          sed -i "s|\"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\"|\"${RS_PUB_KEY}\"|g" libs/hbb_common/src/config.rs
+          # Do NOT echo the patched values to stdout (would leak in build log)
+          # Just verify substitution count
+          server_count=$(grep -c "${RENDEZVOUS_SERVER}" libs/hbb_common/src/config.rs || true)
+          key_count=$(grep -c "${RS_PUB_KEY}" libs/hbb_common/src/config.rs || true)
+          [ "$server_count" -ge 1 ] || { echo "::error::server patch failed"; exit 1; }
+          [ "$key_count" -ge 1 ] || { echo "::error::key patch failed"; exit 1; }
+          echo "config.rs patched OK"
+
+      - name: Download GateInDesk branding
+        shell: bash
+        env:
+          BRANDING_URL: ${{ secrets.BRANDING_URL }}
+        run: |
+          cd rustdesk
+          curl -fsSL -o flutter/assets/logo.png "${BRANDING_URL}/icon-300.png"
+          curl -fsSL -o res/icon.ico "${BRANDING_URL}/icon.ico"
+          curl -fsSL -o flutter/windows/runner/resources/app_icon.ico "${BRANDING_URL}/icon.ico" || true
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Install custom flutter engine
+        shell: pwsh
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          $engineDir = "C:/hostedtoolcache/windows/flutter/stable-${env:FLUTTER_VERSION}-x64/bin/cache/artifacts/engine/windows-x64-release/"
+          if (-not (Test-Path $engineDir)) { New-Item -ItemType Directory -Force -Path $engineDir | Out-Null }
+          Move-Item -Force windows-x64-release/* $engineDir
+
+      - name: Patch Flutter (if upstream patch exists)
+        shell: bash
+        run: |
+          cd rustdesk
+          PATCH=.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          if [ -f "$PATCH" ]; then
+            FLUTTER_DIR=$(dirname $(dirname $(which flutter)))
+            cp "$PATCH" "$FLUTTER_DIR/"
+            (cd "$FLUTTER_DIR" && git apply --whitespace=fix flutter_3.24.4_dropdown_menu_enableFilter.diff || true)
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: windows-gateindesk
+          workspaces: rustdesk
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        shell: bash
+        run: |
+          cd rustdesk
+          $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Generate flutter bridge
+        shell: bash
+        run: |
+          cd rustdesk
+          if [ -f flutter/build_runner.sh ]; then bash flutter/build_runner.sh; fi
+
+      - name: Build GateInDesk
+        shell: pwsh
+        run: |
+          cd rustdesk
+          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          Move-Item -Force ./flutter/build/windows/x64/runner/Release ./gateindesk
+
+      - name: Build self-extracted installer
+        shell: bash
+        run: |
+          cd rustdesk
+          sed -i '/dpiAware/d' res/manifest.xml || true
+          pushd ./libs/portable
+          pip3 install -r requirements.txt
+          python3 ./generate.py -f ../../gateindesk/ -o . -e ../../gateindesk/rustdesk.exe
+          popd
+          mkdir -p ./SignOutput
+          mv ./target/release/rustdesk-portable-packer.exe "./SignOutput/${APP_NAME}-${RUSTDESK_REV}-x86_64-Setup.exe"
+
+      - name: Compute SHA256
+        shell: bash
+        run: |
+          cd rustdesk/SignOutput
+          sha256sum *.exe > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateindesk-windows-x86_64
+          path: rustdesk/SignOutput/
+          retention-days: 30
+
+      - name: Publish to Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag' || inputs.upload-tag != 'nightly'
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          prerelease: ${{ env.TAG_NAME == 'nightly' }}
+          files: rustdesk/SignOutput/*
