@@ -199,17 +199,18 @@ jobs:
           AFTER=$(grep -c "if false {" "$F" || echo 0)
           echo "common.rs patched (sign::verify dead-branched). 'if false {' count: $AFTER"
 
-      - name: Download GateInDesk branding
+      - name: Install GateInDesk branding
         shell: bash
-        env:
-          BRANDING_URL: ${{ secrets.BRANDING_URL }}
         run: |
+          set -e
           cd rustdesk
-          BRANDING_URL=$(printf '%s' "$BRANDING_URL" | tr -d '[:space:]' | sed 's:/*$::')
-          curl -fsSL -o flutter/assets/logo.png "${BRANDING_URL}/icon-300.png"
-          curl -fsSL -o res/icon.ico "${BRANDING_URL}/icon.ico"
-          curl -fsSL -o res/tray-icon.ico "${BRANDING_URL}/icon.ico"
-          curl -fsSL -o flutter/windows/runner/resources/app_icon.ico "${BRANDING_URL}/icon.ico" || true
+          # Branding assets ship inside the meta-repo (patches/branding/),
+          # not via a secret BRANDING_URL — atomic with the workflow that uses them.
+          cp ../meta/patches/branding/logo.png flutter/assets/logo.png
+          cp ../meta/patches/branding/icon.ico res/icon.ico
+          cp ../meta/patches/branding/icon.ico res/tray-icon.ico
+          cp ../meta/patches/branding/icon.ico flutter/windows/runner/resources/app_icon.ico
+          ls -la flutter/assets/logo.png res/icon.ico res/tray-icon.ico flutter/windows/runner/resources/app_icon.ico
 
       - name: Apply branding patches (text + URL rewrites)
         shell: bash
@@ -223,13 +224,17 @@ jobs:
 
           # 2. Footer banner: change pricing URL to our register page,
           #    rewrite text to "Open your account"
-          sed -i 's|const url = "https://rustdesk.com/pricing"|const url = "https://relay.azatmutq.com/_admin/#/register"|' flutter/lib/desktop/pages/connection_page.dart
+          sed -i 's|const url = "https://rustdesk.com/pricing"|const url = "https://gateindesk.azatmutq.com/_admin/#/register"|' flutter/lib/desktop/pages/connection_page.dart
           sed -i 's|"setup_server_tip", "For faster connection, please set up your own server"|"setup_server_tip", "Open your personal account"|' src/lang/en.rs
           sed -i 's|"setup_server_tip", "Для более быстрого подключения настройте собственный сервер."|"setup_server_tip", "Откройте личный кабинет"|' src/lang/ru.rs
 
-          # 3. About: Privacy + Website URLs
-          sed -i "s|launchUrlString('https://rustdesk.com/privacy.html')|launchUrlString('https://relay.azatmutq.com/privacy.html')|" flutter/lib/desktop/pages/desktop_setting_page.dart
-          sed -i "s|launchUrlString('https://rustdesk.com')|launchUrlString('https://relay.azatmutq.com')|" flutter/lib/desktop/pages/desktop_setting_page.dart
+          # 3. About: Privacy + Website URLs (per user 1.5: must point to gateindesk.azatmutq.com)
+          sed -i "s|launchUrlString('https://rustdesk.com/privacy.html')|launchUrlString('https://gateindesk.azatmutq.com/privacy.html')|" flutter/lib/desktop/pages/desktop_setting_page.dart
+          sed -i "s|launchUrlString('https://rustdesk.com')|launchUrlString('https://gateindesk.azatmutq.com')|" flutter/lib/desktop/pages/desktop_setting_page.dart
+
+          # 3a. loadPowered (common.dart) — the underlined "Powered by …" hint in top-left
+          #     opens a URL on click. Rewrite from rustdesk.com to gateindesk.azatmutq.com.
+          sed -i "s|launchUrl(Uri.parse('https://rustdesk.com'))|launchUrl(Uri.parse('https://gateindesk.azatmutq.com'))|" flutter/lib/common.dart
 
           # 4. Copyright Purslane Ltd -> GateInWeb
           sed -i 's|Purslane Ltd|GateInWeb|g' flutter/lib/desktop/pages/desktop_setting_page.dart
@@ -343,6 +348,7 @@ jobs:
                   'relay-server': '${SERVER}:21117',
                   'api-server': 'https://${SERVER}',
                   'key': '${KEY}',
+                  'allow-remote-config-modification': 'Y',
               },
           }
           enc = base64.b64encode(json.dumps(cfg).encode()).decode()
