@@ -16,7 +16,7 @@ on:
 env:
   RUSTDESK_REV: "1.4.6"
   FLUTTER_VERSION: "3.24.5"
-  BRIDGE_FLUTTER_VERSION: "3.22.3"   # bridge codegen needs different flutter than build
+  BRIDGE_FLUTTER_VERSION: "3.22.3"
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   CARGO_EXPAND_VERSION: "1.0.95"
@@ -24,10 +24,11 @@ env:
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   APP_NAME: "GateInDesk"
+  MANUFACTURER: "GateInWeb"
   TAG_NAME: "${{ inputs.upload-tag || 'nightly' }}"
 
   # Required repository secrets:
-  #   RENDEZVOUS_SERVER  e.g. some.host.example
+  #   RENDEZVOUS_SERVER  e.g. relay.example.com (no port)
   #   RS_PUB_KEY         server public key (ed25519, base64)
   #   BRANDING_URL       base URL where icon-300.png / icon.ico are hosted
 
@@ -102,12 +103,12 @@ jobs:
           retention-days: 1
 
   build-windows:
-    name: GateInDesk Windows x86_64
+    name: GateInDesk Windows x86_64 (MSI installer)
     needs: generate-bridge
     runs-on: windows-2022
     timeout-minutes: 120
     permissions:
-      contents: write  # needed for softprops/action-gh-release@v2 to create Release
+      contents: write
 
     steps:
       - name: Validate required secrets are set
@@ -156,7 +157,7 @@ jobs:
           ls -la src/bridge_generated*.rs flutter/lib/generated_bridge*.dart
           echo "bridge files restored OK"
 
-      - name: Patch config.rs (server + pub key) from secrets
+      - name: Patch config.rs fallback constants (belt-and-suspenders)
         shell: bash
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
@@ -182,7 +183,7 @@ jobs:
               print('::error::RS_PUB_KEY substitution did not change config.rs', file=sys.stderr)
               sys.exit(1)
           p.write_text(patched)
-          print(f'config.rs patched OK (server={len(server)}c, key={len(pubkey)}c)')
+          print(f'config.rs fallback patched (server={len(server)}c, key={len(pubkey)}c)')
           PY
 
       - name: Download GateInDesk branding
@@ -244,42 +245,98 @@ jobs:
           cd rustdesk
           $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
 
-      - name: Build GateInDesk
+      - name: Build RustDesk binary (build.py)
         shell: pwsh
         run: |
           cd rustdesk
           python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           Move-Item -Force ./flutter/build/windows/x64/runner/Release ./gateindesk
 
-      - name: Build self-extracted installer
+      - name: Generate custom.txt (HARD_SETTINGS injection)
         shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
         run: |
           cd rustdesk
-          sed -i '/dpiAware/d' res/manifest.xml || true
-          pushd ./libs/portable
+          # Generate base64-encoded JSON config that RustDesk reads on startup.
+          # This is the PRIMARY white-label mechanism (HARD_SETTINGS override).
+          # User cannot change these values via UI even if Settings page is shown.
+          python3 - <<PY
+          import json, base64, os
+          server = os.environ['RENDEZVOUS_SERVER'].strip()
+          key = os.environ['RS_PUB_KEY'].strip()
+          config = {
+              "app-name": "${APP_NAME}",
+              "custom-rendezvous-server": server,
+              "relay-server": f"{server}:21117",
+              "api-server": f"https://{server}",
+              "key": key,
+              "hide-server-settings": "Y",
+              "hide-network-settings": "Y",
+              "disable-settings": "Y"
+          }
+          enc = base64.b64encode(json.dumps(config).encode()).decode()
+          with open('./gateindesk/custom.txt', 'w') as f:
+              f.write(enc)
+          print(f'custom.txt written: {len(enc)} bytes (base64)')
+          print(f'  app-name: {config["app-name"]}')
+          print(f'  server: {server} (length only)')
+          print(f'  key length: {len(key)}c')
+          PY
+          ls -la ./gateindesk/custom.txt
+
+      - name: Install Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build MSI installer
+        shell: bash
+        env:
+          APP_NAME: ${{ env.APP_NAME }}
+          MANUFACTURER: ${{ env.MANUFACTURER }}
+        run: |
+          cd rustdesk/res/msi
           pip3 install -r requirements.txt
-          python3 ./generate.py -f ../../gateindesk/ -o . -e ../../gateindesk/rustdesk.exe
-          popd
-          mkdir -p ./SignOutput
-          mv ./target/release/rustdesk-portable-packer.exe "./SignOutput/${APP_NAME}-${RUSTDESK_REV}-x86_64-Setup.exe"
+          # preprocess.py: replaces "RustDesk" → APP_NAME in all .wxl files,
+          # generates Components from files in -d directory.
+          python preprocess.py \
+            --arp \
+            --app-name "${APP_NAME}" \
+            --manufacturer "${MANUFACTURER}" \
+            --custom \
+            -d ../../gateindesk
+          nuget restore msi.sln
+          msbuild msi.sln \
+            -p:Configuration=Release \
+            -p:Platform=x64 \
+            /p:TargetVersion=Windows10
+          mkdir -p ../../SignOutput
+          # Standard MSI output path
+          MSI_SRC=$(find ./Package/bin -name "*.msi" | head -1)
+          if [ -z "$MSI_SRC" ]; then
+            echo "::error::MSI not found in ./Package/bin/"
+            find ./Package -type f | head -30
+            exit 1
+          fi
+          mv "$MSI_SRC" "../../SignOutput/${APP_NAME}-${RUSTDESK_REV}-x86_64.msi"
+          ls -la ../../SignOutput/
 
       - name: Compute SHA256
         shell: bash
         run: |
           cd rustdesk/SignOutput
-          sha256sum *.exe > SHA256SUMS
+          sha256sum *.msi > SHA256SUMS
           cat SHA256SUMS
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gateindesk-windows-x86_64
+          name: gateindesk-windows-x86_64-msi
           path: rustdesk/SignOutput/
           retention-days: 30
 
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag' || inputs.upload-tag != 'nightly'
         with:
           tag_name: ${{ env.TAG_NAME }}
           prerelease: ${{ env.TAG_NAME == 'nightly' }}
