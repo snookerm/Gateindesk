@@ -106,6 +106,8 @@ jobs:
     needs: generate-bridge
     runs-on: windows-2022
     timeout-minutes: 120
+    permissions:
+      contents: write  # needed for softprops/action-gh-release@v2 to create Release
 
     steps:
       - name: Validate required secrets are set
