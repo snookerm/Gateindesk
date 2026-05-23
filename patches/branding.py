@@ -101,11 +101,14 @@ def patch_login_register_button():
         print("login.dart: skip (Login button anchor not found)")
         return
 
+    # login.dart imports only `package:url_launcher/url_launcher.dart`
+    # (NOT url_launcher_string). Use launchUrl(Uri.parse(...)) — same as line 175.
     new = old + """
             const SizedBox(height: 8.0),
             TextButton(
               onPressed: () {
-                launchUrlString('https://relay.azatmutq.com/_admin/#/register');
+                launchUrl(Uri.parse('https://relay.azatmutq.com/_admin/#/register'),
+                    mode: LaunchMode.externalApplication);
               },
               child: Text('Регистрация', style: TextStyle(fontSize: 14)),
             ),"""
