@@ -183,12 +183,6 @@ jobs:
           print(f'config.rs patched OK (server={len(server)}c, key={len(pubkey)}c)')
           PY
 
-      - name: Patch flutter pubspec (extended_text version)
-        shell: bash
-        run: |
-          cd rustdesk/flutter
-          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' pubspec.yaml
-
       - name: Download GateInDesk branding
         shell: bash
         env:
