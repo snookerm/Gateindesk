@@ -217,7 +217,14 @@ jobs:
           # repaint due to Windows icon cache. Copy our ico into Flutter assets
           # so it is bundled at build time and resolved at runtime.
           cp ../meta/patches/branding/icon.ico flutter/assets/icon.ico
-          ls -la flutter/assets/logo.png flutter/assets/icon.ico res/icon.ico res/tray-icon.ico flutter/windows/runner/resources/app_icon.ico
+          # CRITICAL: in-UI top-left logo widget (common.dart:3743) loads
+          # 'assets/icon.svg' via SvgPicture.asset — upstream ships an
+          # RustDesk blue-circle "G" SVG which we never replaced. Overwrite it
+          # with our PNG wrapped in valid SVG (incident 2026-05-24 — user
+          # screenshot showed blue G in title bar despite WM_SETICON being
+          # set correctly).
+          cp ../meta/patches/branding/icon.svg flutter/assets/icon.svg
+          ls -la flutter/assets/logo.png flutter/assets/icon.ico flutter/assets/icon.svg res/icon.ico res/tray-icon.ico flutter/windows/runner/resources/app_icon.ico
 
       - name: Apply branding patches (text + URL rewrites)
         shell: bash
