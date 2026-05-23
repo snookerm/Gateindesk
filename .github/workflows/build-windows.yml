@@ -348,18 +348,20 @@ jobs:
           # 2026-05-23 (Network tab stays visible).
           python3 -c "
           import json, base64
+          # CRITICAL: BUILTIN_SETTINGS keys (hide-server-settings, hide-proxy-settings,
+          # allow-remote-config-modification, etc.) MUST live INSIDE override-settings.
+          # Top-level placement puts them in HARD_SETTINGS, but client reads via
+          # get_builtin_option() -> BUILTIN_SETTINGS, so flags are silently ignored.
+          # See common.rs:2106-2161 read_custom_client_advanced_settings -> buildin_settings.
           cfg = {
               'app-name': '${APP_NAME}',
-              # hide-server-settings: hide ONLY ID/Relay/API/Key fields in
-              # Settings → Network. Proxy and WebSocket sections stay visible
-              # so corporate clients with SOCKS5 / WS still work.
-              'hide-server-settings': 'Y',
               'override-settings': {
                   'custom-rendezvous-server': '${SERVER}',
                   'relay-server': '${SERVER}:21117',
                   'api-server': 'https://${SERVER}',
                   'key': '${KEY}',
                   'allow-remote-config-modification': 'Y',
+                  'hide-server-settings': 'Y',
               },
           }
           enc = base64.b64encode(json.dumps(cfg).encode()).decode()
