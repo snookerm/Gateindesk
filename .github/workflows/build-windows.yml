@@ -210,7 +210,14 @@ jobs:
           cp ../meta/patches/branding/icon.ico res/icon.ico
           cp ../meta/patches/branding/icon.ico res/tray-icon.ico
           cp ../meta/patches/branding/icon.ico flutter/windows/runner/resources/app_icon.ico
-          ls -la flutter/assets/logo.png res/icon.ico res/tray-icon.ico flutter/windows/runner/resources/app_icon.ico
+          # CRITICAL: Window class top-left titlebar icon is loaded at runtime
+          # from data\flutter_assets\assets\icon.ico via LoadCustomIcon() in
+          # flutter/windows/runner/win32_window.cpp:40-53. Without this file
+          # Flutter falls back to IDI_APP_ICON from Runner.rc — which may not
+          # repaint due to Windows icon cache. Copy our ico into Flutter assets
+          # so it is bundled at build time and resolved at runtime.
+          cp ../meta/patches/branding/icon.ico flutter/assets/icon.ico
+          ls -la flutter/assets/logo.png flutter/assets/icon.ico res/icon.ico res/tray-icon.ico flutter/windows/runner/resources/app_icon.ico
 
       - name: Apply branding patches (text + URL rewrites)
         shell: bash
@@ -343,6 +350,10 @@ jobs:
           import json, base64
           cfg = {
               'app-name': '${APP_NAME}',
+              # hide-server-settings: hide ONLY ID/Relay/API/Key fields in
+              # Settings → Network. Proxy and WebSocket sections stay visible
+              # so corporate clients with SOCKS5 / WS still work.
+              'hide-server-settings': 'Y',
               'override-settings': {
                   'custom-rendezvous-server': '${SERVER}',
                   'relay-server': '${SERVER}:21117',
