@@ -255,8 +255,17 @@ jobs:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         shell: bash
         run: |
+          set -e
           cd rustdesk
-          $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+          n=0; max=3
+          until "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"; do
+            n=$((n+1))
+            if [ $n -ge $max ]; then
+              echo "::error::vcpkg install failed after $max attempts"; exit 1
+            fi
+            echo "::warning::attempt $n failed (likely GitHub 502/transient), retrying in $((n*60))s"
+            sleep $((n*60))
+          done
 
       - name: Build RustDesk binary (build.py)
         shell: pwsh
@@ -264,6 +273,12 @@ jobs:
           cd rustdesk
           python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           Move-Item -Force ./flutter/build/windows/x64/runner/Release ./gateindesk
+          # build.py emits 'rustdesk.exe' (from Cargo.toml package name).
+          # MSI preprocess.py:458 looks for "${app_name}.exe" → rename.
+          if (Test-Path ./gateindesk/rustdesk.exe) {
+            Move-Item -Force ./gateindesk/rustdesk.exe "./gateindesk/${env:APP_NAME}.exe"
+          }
+          Get-ChildItem ./gateindesk/*.exe | Select-Object Name,Length
 
       - name: Generate custom.txt (HARD_SETTINGS injection)
         shell: bash
@@ -326,47 +341,50 @@ jobs:
           nuget help 2>&1 | head -3 || true
 
       - name: Build MSI installer
-        shell: bash
+        shell: pwsh
         env:
           APP_NAME: ${{ env.APP_NAME }}
           MANUFACTURER: ${{ env.MANUFACTURER }}
         run: |
-          set -ex
-          cd rustdesk/res/msi
-          # Install python deps if requirements.txt exists
-          if [ -f requirements.txt ]; then
+          $ErrorActionPreference = 'Stop'
+          Set-Location rustdesk/res/msi
+
+          if (Test-Path requirements.txt) {
             pip3 install -r requirements.txt
-          else
-            echo "no requirements.txt — skip pip install"
-          fi
-          # preprocess.py: replaces "RustDesk" → APP_NAME in all .wxl,
-          # generates Components from files in -d directory
-          python preprocess.py \
-            --arp \
-            --app-name "${APP_NAME}" \
-            --manufacturer "${MANUFACTURER}" \
-            --custom \
+          } else {
+            Write-Host "no requirements.txt - skip pip install"
+          }
+
+          # preprocess.py:474 falls back to running '$dist_app --version' when -v omitted.
+          # Pass -v explicitly so it does NOT invoke the .exe for version detection.
+          # preprocess.py:485 still invokes '--build-date' on the .exe; .exe must exist
+          # under the expected name (handled by rename step in 'Build RustDesk binary').
+          python preprocess.py `
+            --arp `
+            --app-name "$env:APP_NAME" `
+            --manufacturer "$env:MANUFACTURER" `
+            -v "$env:RUSTDESK_REV" `
+            --custom `
             -d ../../gateindesk
-          # NuGet restore
+
           nuget restore msi.sln
-          # MSBuild
-          msbuild msi.sln \
-            -p:Configuration=Release \
-            -p:Platform=x64 \
+
+          msbuild msi.sln `
+            -p:Configuration=Release `
+            -p:Platform=x64 `
             /p:TargetVersion=Windows10
-          # Find the produced MSI
-          mkdir -p ../../SignOutput
-          echo "=== finding MSI ==="
-          find ./Package -name "*.msi" -type f
-          MSI_SRC=$(find ./Package -name "*.msi" -type f | head -1)
-          if [ -z "$MSI_SRC" ]; then
-            echo "::error::MSI not found anywhere under ./Package/"
-            echo "--- listing ./Package contents ---"
-            find ./Package -type f | head -50
+
+          New-Item -ItemType Directory -Force -Path ../../SignOutput | Out-Null
+          Write-Host "=== finding MSI ==="
+          $msi = Get-ChildItem -Path ./Package -Recurse -Filter "*.msi" | Select-Object -First 1
+          if ($null -eq $msi) {
+            Write-Host "::error::MSI not found under ./Package/"
+            Get-ChildItem -Path ./Package -Recurse | Select-Object FullName | Format-Table -AutoSize
             exit 1
-          fi
-          mv "$MSI_SRC" "../../SignOutput/${APP_NAME}-${RUSTDESK_REV}-x86_64.msi"
-          ls -la ../../SignOutput/
+          }
+          $dst = "../../SignOutput/$($env:APP_NAME)-$($env:RUSTDESK_REV)-x86_64.msi"
+          Move-Item -Force $msi.FullName $dst
+          Get-ChildItem ../../SignOutput/
 
       - name: Compute SHA256
         shell: bash
