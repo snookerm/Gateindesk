@@ -157,79 +157,47 @@ jobs:
           ls -la src/bridge_generated*.rs flutter/lib/generated_bridge*.dart
           echo "bridge files restored OK"
 
-      - name: Patch config.rs fallback constants (belt-and-suspenders)
+      - name: Patch config.rs fallback constants
         shell: bash
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
           RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
         run: |
+          set -e
           cd rustdesk
-          python3 - <<'PY'
-          import os, pathlib, sys
-          p = pathlib.Path('libs/hbb_common/src/config.rs')
-          src = p.read_text()
-          server = os.environ['RENDEZVOUS_SERVER'].strip()
-          pubkey = os.environ['RS_PUB_KEY'].strip()
-          patched = src.replace('"rs-ny.rustdesk.com"', f'"{server}"')
-          if patched == src:
-              print('::error::RENDEZVOUS_SERVERS substitution did not change config.rs', file=sys.stderr)
-              sys.exit(1)
-          src = patched
-          patched = src.replace(
-              '"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw="',
-              f'"{pubkey}"',
-          )
-          if patched == src:
-              print('::error::RS_PUB_KEY substitution did not change config.rs', file=sys.stderr)
-              sys.exit(1)
-          p.write_text(patched)
-          print(f'config.rs fallback patched (server={len(server)}c, key={len(pubkey)}c)')
-          PY
+          F=libs/hbb_common/src/config.rs
+          SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
+          PUBKEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
+          # Use | as sed delimiter (not / since URL/base64 may contain /)
+          sed -i "s|\"rs-ny.rustdesk.com\"|\"${SERVER}\"|g" "$F"
+          sed -i "s|\"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\"|\"${PUBKEY}\"|g" "$F"
+          # Verify substitutions happened (don't log values themselves — secret leakage)
+          grep -q "${SERVER}" "$F" || { echo "::error::server patch failed"; exit 1; }
+          grep -q "${PUBKEY}" "$F" || { echo "::error::key patch failed"; exit 1; }
+          echo "config.rs fallback patched OK"
 
       - name: Patch common.rs — disable custom.txt signature verification
         shell: bash
         run: |
+          set -e
           cd rustdesk
-          # Skip Pro signature verification in read_custom_client() so we can
-          # provide plain base64-JSON custom.txt instead of one signed by
-          # the official RustDesk Pro Custom Client Generator.
-          python3 - <<'PY'
-          import pathlib, sys
-          p = pathlib.Path('src/common.rs')
-          src = p.read_text()
-          # Original (around line 2192):
-          #   let Ok(data) = sign::verify(&data, &pk) else {
-          #       log::error!("Failed to dec custom client config");
-          #       return;
-          #   };
-          # Replace with passthrough (data is already the decoded base64 bytes).
-          old = '''let Ok(data) = sign::verify(&data, &pk) else {
-        log::error!("Failed to dec custom client config");
-        return;
-    };'''
-          new = '''// SIG-VERIFY DISABLED (white-label build): we control the build,
-    // no need to verify Pro Custom Client Generator signature.
-    let _ = pk; // suppress unused warning
-    // skip sign::verify — proceed with raw decoded bytes'''
-          patched = src.replace(old, new)
-          if patched == src:
-              # Try with different whitespace (CRLF, indentation drift)
-              import re
-              pat = re.compile(
-                  r'let Ok\(data\) = sign::verify\(&data, &pk\) else \{[^}]*?log::error!\("Failed to dec custom client config"\);[^}]*?return;[^}]*?\};',
-                  re.DOTALL,
-              )
-              patched, n = pat.subn(new, src)
-              if n == 0:
-                  print('::error::could not locate sign::verify block in src/common.rs', file=sys.stderr)
-                  print('--- showing lines 2180-2210 for debug ---', file=sys.stderr)
-                  for i, line in enumerate(src.splitlines()[2180:2210], start=2181):
-                      print(f'{i}: {line}', file=sys.stderr)
-                  sys.exit(1)
-          p.write_text(patched)
-          # Also need to remove get_rs_pk import if it becomes dead
-          print('common.rs sign::verify check disabled OK')
-          PY
+          F=src/common.rs
+          # Original lines (around 2193-2196):
+          #     let Ok(data) = sign::verify(&data, &pk) else {
+          #         log::error!("Failed to dec custom client config");
+          #         return;
+          #     };
+          # Trick: replace opening line so log::error/return/}; become a
+          # dead `if false { ... }` block. Compiler happy, signature check
+          # is bypassed at runtime, no semantic shift in surrounding code.
+          BEFORE=$(grep -c "let Ok(data) = sign::verify(&data, &pk) else {" "$F" || echo 0)
+          if [ "$BEFORE" != "1" ]; then
+            echo "::error::Expected exactly 1 sign::verify line, found $BEFORE"
+            exit 1
+          fi
+          sed -i 's|let Ok(data) = sign::verify(&data, \&pk) else {|let _ = pk; let data = data; if false {|' "$F"
+          AFTER=$(grep -c "if false {" "$F" || echo 0)
+          echo "common.rs patched (sign::verify dead-branched). 'if false {' count: $AFTER"
 
       - name: Download GateInDesk branding
         shell: bash
@@ -302,33 +270,60 @@ jobs:
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
           RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+          APP_NAME: ${{ env.APP_NAME }}
         run: |
+          set -e
           cd rustdesk
-          python3 - <<PY
-          import json, base64, os
-          server = os.environ['RENDEZVOUS_SERVER'].strip()
-          key = os.environ['RS_PUB_KEY'].strip()
-          config = {
-              "app-name": "${APP_NAME}",
-              "custom-rendezvous-server": server,
-              "relay-server": f"{server}:21117",
-              "api-server": f"https://{server}",
-              "key": key,
-              "hide-server-settings": "Y",
-              "hide-network-settings": "Y",
-              "hide-proxy-settings": "Y",
-              "hide-websocket-settings": "Y",
-              "disable-settings": "Y"
+          SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
+          KEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
+          # Build JSON via python -c (one-liner, no heredoc to avoid YAML escaping pitfalls)
+          python3 -c "
+          import json, base64
+          cfg = {
+              'app-name': '${APP_NAME}',
+              'custom-rendezvous-server': '${SERVER}',
+              'relay-server': '${SERVER}:21117',
+              'api-server': 'https://${SERVER}',
+              'key': '${KEY}',
+              'hide-server-settings': 'Y',
+              'hide-network-settings': 'Y',
+              'hide-proxy-settings': 'Y',
+              'hide-websocket-settings': 'Y',
+              'disable-settings': 'Y',
           }
-          enc = base64.b64encode(json.dumps(config).encode()).decode()
-          with open('./gateindesk/custom.txt', 'w') as f:
-              f.write(enc)
-          print(f'custom.txt written: {len(enc)} bytes (base64)')
-          PY
+          enc = base64.b64encode(json.dumps(cfg).encode()).decode()
+          open('./gateindesk/custom.txt', 'w').write(enc)
+          print(f'custom.txt: {len(enc)} bytes (base64)')
+          "
           ls -la ./gateindesk/custom.txt
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+        with:
+          nuget-version: 'latest'
+
+      - name: Pre-flight diagnostics for MSI build
+        shell: bash
+        run: |
+          set -x
+          cd rustdesk/res/msi
+          pwd
+          ls -la
+          echo "=== requirements.txt content ==="
+          cat requirements.txt 2>&1 || echo "NO requirements.txt"
+          echo "=== msi.sln presence ==="
+          ls -la msi.sln 2>&1 || echo "NO msi.sln"
+          echo "=== preprocess.py args ==="
+          python preprocess.py --help 2>&1 | head -40 || echo "preprocess.py --help failed"
+          echo "=== tools versions ==="
+          which msbuild || echo "no msbuild in PATH"
+          which nuget || echo "no nuget in PATH"
+          which python || echo "no python"
+          msbuild -version 2>&1 | head -3 || true
+          nuget help 2>&1 | head -3 || true
 
       - name: Build MSI installer
         shell: bash
@@ -336,24 +331,38 @@ jobs:
           APP_NAME: ${{ env.APP_NAME }}
           MANUFACTURER: ${{ env.MANUFACTURER }}
         run: |
+          set -ex
           cd rustdesk/res/msi
-          pip3 install -r requirements.txt
+          # Install python deps if requirements.txt exists
+          if [ -f requirements.txt ]; then
+            pip3 install -r requirements.txt
+          else
+            echo "no requirements.txt — skip pip install"
+          fi
+          # preprocess.py: replaces "RustDesk" → APP_NAME in all .wxl,
+          # generates Components from files in -d directory
           python preprocess.py \
             --arp \
             --app-name "${APP_NAME}" \
             --manufacturer "${MANUFACTURER}" \
             --custom \
             -d ../../gateindesk
+          # NuGet restore
           nuget restore msi.sln
+          # MSBuild
           msbuild msi.sln \
             -p:Configuration=Release \
             -p:Platform=x64 \
             /p:TargetVersion=Windows10
+          # Find the produced MSI
           mkdir -p ../../SignOutput
-          MSI_SRC=$(find ./Package/bin -name "*.msi" | head -1)
+          echo "=== finding MSI ==="
+          find ./Package -name "*.msi" -type f
+          MSI_SRC=$(find ./Package -name "*.msi" -type f | head -1)
           if [ -z "$MSI_SRC" ]; then
-            echo "::error::MSI not found in ./Package/bin/"
-            find ./Package -type f | head -30
+            echo "::error::MSI not found anywhere under ./Package/"
+            echo "--- listing ./Package contents ---"
+            find ./Package -type f | head -50
             exit 1
           fi
           mv "$MSI_SRC" "../../SignOutput/${APP_NAME}-${RUSTDESK_REV}-x86_64.msi"
