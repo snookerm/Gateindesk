@@ -348,11 +348,18 @@ jobs:
           # 2026-05-23 (Network tab stays visible).
           python3 -c "
           import json, base64
-          # CRITICAL: BUILTIN_SETTINGS keys (hide-server-settings, hide-proxy-settings,
-          # allow-remote-config-modification, etc.) MUST live INSIDE override-settings.
-          # Top-level placement puts them in HARD_SETTINGS, but client reads via
-          # get_builtin_option() -> BUILTIN_SETTINGS, so flags are silently ignored.
-          # See common.rs:2106-2161 read_custom_client_advanced_settings -> buildin_settings.
+          # CUSTOM.TXT STRUCTURE NOTES (learned the hard way 2026-05-24):
+          #
+          # override-settings  -> applied EVERY START, user CANNOT change
+          #                       (use for: server endpoints, build-in flags
+          #                        that must stay locked like hide-server-settings)
+          # default-settings   -> applied ONLY when LocalConfig key absent
+          #                       (use for: initial defaults user CAN override later
+          #                        like allow-remote-config-modification toggle)
+          # top-level keys     -> go into HARD_SETTINGS (only useful for
+          #                       app-name lookup, NOT for hide-* / toggle flags)
+          #
+          # See src/common.rs:2225-2252 + libs/hbb_common/src/config.rs:3080-3094.
           cfg = {
               'app-name': '${APP_NAME}',
               'override-settings': {
@@ -360,8 +367,10 @@ jobs:
                   'relay-server': '${SERVER}:21117',
                   'api-server': 'https://${SERVER}',
                   'key': '${KEY}',
-                  'allow-remote-config-modification': 'Y',
                   'hide-server-settings': 'Y',
+              },
+              'default-settings': {
+                  'allow-remote-config-modification': 'Y',
               },
           }
           enc = base64.b64encode(json.dumps(cfg).encode()).decode()

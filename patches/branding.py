@@ -66,6 +66,25 @@ def patch_user_model_oidc():
     print("user_model.dart: common-oidc/null guard added")
 
 
+def patch_main_window_icon():
+    """Force-set window icon via window_manager (Tao Thread Event Target class
+    ignores our app_icon.ico resource; window_manager plugin sets it via
+    native WM_SETICON after window is created)."""
+    f = Path("flutter/lib/main.dart")
+    src = f.read_text(encoding="utf-8")
+    if "setIcon('assets/icon.ico')" in src:
+        print("main.dart: skip (already has setIcon)")
+        return
+    old = "windowManager.setTitle(getWindowName());"
+    new = ("windowManager.setIcon('assets/icon.ico');\n"
+           "    windowManager.setTitle(getWindowName());")
+    if old not in src:
+        print("main.dart: skip (setTitle anchor not found)")
+        return
+    f.write_text(src.replace(old, new), encoding="utf-8")
+    print("main.dart: setIcon injected before setTitle")
+
+
 def patch_login_register_button():
     """Add Регистрация TextButton under the Login button in user/pass login form."""
     f = Path("flutter/lib/common/widgets/login.dart")
@@ -123,6 +142,7 @@ def main():
     patch_about_dialog()
     patch_user_model_oidc()
     patch_login_register_button()
+    patch_main_window_icon()
     print("=== branding patches done ===")
 
 
