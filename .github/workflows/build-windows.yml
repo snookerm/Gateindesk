@@ -186,6 +186,51 @@ jobs:
           print(f'config.rs fallback patched (server={len(server)}c, key={len(pubkey)}c)')
           PY
 
+      - name: Patch common.rs — disable custom.txt signature verification
+        shell: bash
+        run: |
+          cd rustdesk
+          # Skip Pro signature verification in read_custom_client() so we can
+          # provide plain base64-JSON custom.txt instead of one signed by
+          # the official RustDesk Pro Custom Client Generator.
+          python3 - <<'PY'
+          import pathlib, sys
+          p = pathlib.Path('src/common.rs')
+          src = p.read_text()
+          # Original (around line 2192):
+          #   let Ok(data) = sign::verify(&data, &pk) else {
+          #       log::error!("Failed to dec custom client config");
+          #       return;
+          #   };
+          # Replace with passthrough (data is already the decoded base64 bytes).
+          old = '''let Ok(data) = sign::verify(&data, &pk) else {
+        log::error!("Failed to dec custom client config");
+        return;
+    };'''
+          new = '''// SIG-VERIFY DISABLED (white-label build): we control the build,
+    // no need to verify Pro Custom Client Generator signature.
+    let _ = pk; // suppress unused warning
+    // skip sign::verify — proceed with raw decoded bytes'''
+          patched = src.replace(old, new)
+          if patched == src:
+              # Try with different whitespace (CRLF, indentation drift)
+              import re
+              pat = re.compile(
+                  r'let Ok\(data\) = sign::verify\(&data, &pk\) else \{[^}]*?log::error!\("Failed to dec custom client config"\);[^}]*?return;[^}]*?\};',
+                  re.DOTALL,
+              )
+              patched, n = pat.subn(new, src)
+              if n == 0:
+                  print('::error::could not locate sign::verify block in src/common.rs', file=sys.stderr)
+                  print('--- showing lines 2180-2210 for debug ---', file=sys.stderr)
+                  for i, line in enumerate(src.splitlines()[2180:2210], start=2181):
+                      print(f'{i}: {line}', file=sys.stderr)
+                  sys.exit(1)
+          p.write_text(patched)
+          # Also need to remove get_rs_pk import if it becomes dead
+          print('common.rs sign::verify check disabled OK')
+          PY
+
       - name: Download GateInDesk branding
         shell: bash
         env:
@@ -259,9 +304,6 @@ jobs:
           RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
         run: |
           cd rustdesk
-          # Generate base64-encoded JSON config that RustDesk reads on startup.
-          # This is the PRIMARY white-label mechanism (HARD_SETTINGS override).
-          # User cannot change these values via UI even if Settings page is shown.
           python3 - <<PY
           import json, base64, os
           server = os.environ['RENDEZVOUS_SERVER'].strip()
@@ -274,19 +316,18 @@ jobs:
               "key": key,
               "hide-server-settings": "Y",
               "hide-network-settings": "Y",
+              "hide-proxy-settings": "Y",
+              "hide-websocket-settings": "Y",
               "disable-settings": "Y"
           }
           enc = base64.b64encode(json.dumps(config).encode()).decode()
           with open('./gateindesk/custom.txt', 'w') as f:
               f.write(enc)
           print(f'custom.txt written: {len(enc)} bytes (base64)')
-          print(f'  app-name: {config["app-name"]}')
-          print(f'  server: {server} (length only)')
-          print(f'  key length: {len(key)}c')
           PY
           ls -la ./gateindesk/custom.txt
 
-      - name: Install Add MSBuild to PATH
+      - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
       - name: Build MSI installer
@@ -297,8 +338,6 @@ jobs:
         run: |
           cd rustdesk/res/msi
           pip3 install -r requirements.txt
-          # preprocess.py: replaces "RustDesk" → APP_NAME in all .wxl files,
-          # generates Components from files in -d directory.
           python preprocess.py \
             --arp \
             --app-name "${APP_NAME}" \
@@ -311,7 +350,6 @@ jobs:
             -p:Platform=x64 \
             /p:TargetVersion=Windows10
           mkdir -p ../../SignOutput
-          # Standard MSI output path
           MSI_SRC=$(find ./Package/bin -name "*.msi" | head -1)
           if [ -z "$MSI_SRC" ]; then
             echo "::error::MSI not found in ./Package/bin/"
