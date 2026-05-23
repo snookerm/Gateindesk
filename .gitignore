@@ -15,3 +15,5 @@ dist/
 *.env
 *.pem
 *.key
+
+# Trigger rebuild: 2026-05-23 (icon.ico format 3.0 fix)
