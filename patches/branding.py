@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 GateInDesk branding patches that don't fit into one-line sed.
 
 Run from inside rustdesk/ checkout root (not res/, not flutter/).
-All patches are idempotent — repeat invocations are safe.
+All patches are idempotent: repeat invocations are safe.
 """
 import sys
 from pathlib import Path
+
+# Windows Python defaults to cp1252 for stdout. Force UTF-8 so log lines
+# survive (file writes already pin encoding='utf-8' explicitly).
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 
 def patch_about_dialog():
@@ -14,7 +22,7 @@ def patch_about_dialog():
     f = Path("flutter/lib/desktop/pages/desktop_setting_page.dart")
     src = f.read_text(encoding="utf-8")
     if "'Личный кабинет'" in src:
-        print("About: skip (already has Личный кабинет)")
+        print("About: skip (already has account link)")
         return
 
     website_anchor = """InkWell(
@@ -39,7 +47,7 @@ def patch_about_dialog():
               """ + website_anchor
 
     f.write_text(src.replace(website_anchor, account_link), encoding="utf-8")
-    print("About: Личный кабинет link inserted")
+    print("About: account link inserted")
 
 
 def patch_user_model_oidc():
@@ -63,7 +71,7 @@ def patch_login_register_button():
     f = Path("flutter/lib/common/widgets/login.dart")
     src = f.read_text(encoding="utf-8")
     if "'Регистрация'" in src:
-        print("login.dart: skip (already has Регистрация)")
+        print("login.dart: skip (already has register button)")
         return
 
     # Anchor: the FittedBox row that wraps the Login ElevatedButton.
@@ -103,7 +111,7 @@ def patch_login_register_button():
             ),"""
 
     f.write_text(src.replace(old, new), encoding="utf-8")
-    print("login.dart: Регистрация button inserted")
+    print("login.dart: register button inserted")
 
 
 def main():
