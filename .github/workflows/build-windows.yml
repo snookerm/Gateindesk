@@ -236,6 +236,17 @@ jobs:
           sed -i 's|"powered_by_me", "Powered by RustDesk"|"powered_by_me", "Powered by GateInDesk"|' src/lang/en.rs
           sed -i 's|"powered_by_me", "Основано на RustDesk"|"powered_by_me", "Работает на GateInDesk"|' src/lang/ru.rs
 
+          # 1a. Auto-update: rewrite hardcoded version-check URL
+          #     hbb_common/src/lib.rs:496 has const URL = "https://api.rustdesk.com/version/latest"
+          sed -i 's|https://api.rustdesk.com/version/latest|https://api.azatmutq.com/api/version/latest|' libs/hbb_common/src/lib.rs
+
+          # 1b. Auto-update: remove is_custom_client early-return guard in
+          #     check_software_update (common.rs:943-945) — RustDesk
+          #     normally disables update checks for forks, we want them on.
+          #     Replace the body of check_software_update conditional.
+          sed -i 's|if is_custom_client() { return; }|if false { return; }|' src/common.rs
+          # The above pattern in common.rs is on lines around 943; sed is line-agnostic.
+
           # 2. Footer banner: change pricing URL to our register page,
           #    rewrite text to "Open your account"
           sed -i 's|const url = "https://rustdesk.com/pricing"|const url = "https://gateindesk.azatmutq.com/_admin/#/register"|' flutter/lib/desktop/pages/connection_page.dart
@@ -372,12 +383,17 @@ jobs:
               'override-settings': {
                   'custom-rendezvous-server': '${SERVER}',
                   'relay-server': '${SERVER}:21117',
-                  'api-server': 'https://${SERVER}',
+                  # NEW: client API moved to api.azatmutq.com (dedicated vhost
+                  # with rate-limit + security headers). relay.azatmutq.com
+                  # still serves /api/* for backward compat with older installs.
+                  'api-server': 'https://api.azatmutq.com',
                   'key': '${KEY}',
                   'hide-server-settings': 'Y',
               },
               'default-settings': {
                   'allow-remote-config-modification': 'Y',
+                  # Enable auto-update check; user can opt out in Settings.
+                  'enable-check-update': 'Y',
               },
           }
           enc = base64.b64encode(json.dumps(cfg).encode()).decode()

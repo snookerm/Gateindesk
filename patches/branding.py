@@ -187,6 +187,156 @@ def patch_login_register_button():
     print("login.dart: register button inserted")
 
 
+def patch_support_dialog():
+    """Add 'Служба поддержки' link in About dialog + popup with
+    name/email/phone/message form posting to https://api.azatmutq.com/api/support."""
+    f = Path("flutter/lib/desktop/pages/desktop_setting_page.dart")
+    src = f.read_text(encoding="utf-8")
+    if "showGateInDeskSupportDialog" in src:
+        print("support dialog: skip (already injected)")
+        return
+
+    # 1. Add InkWell link right after our 'Личный кабинет' (or before Website if absent)
+    anchor = """InkWell(
+                  onTap: () {
+                    launchUrlString('https://gateindesk.azatmutq.com');
+                  },
+                  child: Text(
+                    translate('Website'),"""
+    if anchor not in src:
+        print("support dialog: skip (Website anchor not found)")
+        return
+
+    support_link = """InkWell(
+                  onTap: () => showGateInDeskSupportDialog(context),
+                  child: Text(
+                    'Служба поддержки',
+                    style: linkStyle,
+                  ).marginSymmetric(vertical: 4.0)),
+              """ + anchor
+    src = src.replace(anchor, support_link)
+
+    # 2. Ensure http_service import is present
+    if "as gd_http;" not in src:
+        first_import = src.find("import ")
+        src = src[:first_import] + (
+            "import 'package:flutter_hbb/utils/http_service.dart' as gd_http;\n"
+        ) + src[first_import:]
+
+    # 3. Append the dialog implementation at the end of the file (top-level)
+    helper = '''
+
+// ────────────────────────────────────────────────────────────────────
+// GateInDesk support form (added by patches/branding.py)
+// POST https://api.azatmutq.com/api/support → SMTP to gurgen@gateinweb.ru
+// ────────────────────────────────────────────────────────────────────
+void showGateInDeskSupportDialog(BuildContext context) {
+  final nameCtl    = TextEditingController();
+  final emailCtl   = TextEditingController();
+  final phoneCtl   = TextEditingController();
+  final messageCtl = TextEditingController();
+  bool sending = false;
+  String? status;
+  bool isError = false;
+
+  gFFI.dialogManager.show<bool>((setState, close, context) {
+    Future<void> submit() async {
+      if (nameCtl.text.trim().isEmpty ||
+          emailCtl.text.trim().isEmpty ||
+          messageCtl.text.trim().isEmpty) {
+        setState(() {
+          status = "Заполните ФИО, Email и текст сообщения";
+          isError = true;
+        });
+        return;
+      }
+      setState(() { sending = true; status = null; isError = false; });
+      try {
+        final resp = await gd_http.post(
+          Uri.parse('https://api.azatmutq.com/api/support'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'name': nameCtl.text.trim(),
+            'email': emailCtl.text.trim(),
+            'phone': phoneCtl.text.trim(),
+            'message': messageCtl.text.trim(),
+          }),
+        );
+        if (resp.statusCode == 200) {
+          setState(() {
+            sending = false;
+            status = "Сообщение отправлено. Мы свяжемся в течение суток.";
+            isError = false;
+          });
+          Future.delayed(const Duration(seconds: 2), () => close(true));
+        } else {
+          setState(() {
+            sending = false;
+            status = "Ошибка сервера: ${resp.statusCode}";
+            isError = true;
+          });
+        }
+      } catch (e) {
+        setState(() {
+          sending = false;
+          status = "Сетевая ошибка. Попробуйте позже.";
+          isError = true;
+        });
+      }
+    }
+
+    return CustomAlertDialog(
+      title: Text("Служба поддержки GateInDesk"),
+      contentBoxConstraints: BoxConstraints(minWidth: 380, maxWidth: 460),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(controller: nameCtl, decoration: InputDecoration(labelText: "ФИО *")),
+          const SizedBox(height: 8),
+          TextField(controller: emailCtl, decoration: InputDecoration(labelText: "Email *")),
+          const SizedBox(height: 8),
+          TextField(controller: phoneCtl, decoration: InputDecoration(labelText: "Телефон")),
+          const SizedBox(height: 8),
+          TextField(
+            controller: messageCtl,
+            decoration: InputDecoration(labelText: "Сообщение *"),
+            maxLines: 5,
+            minLines: 3,
+          ),
+          if (status != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(status!,
+                style: TextStyle(
+                  color: isError ? Colors.red : Colors.green,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          if (sending) const Padding(
+            padding: EdgeInsets.only(top: 12),
+            child: LinearProgressIndicator(),
+          ),
+        ],
+      ),
+      onCancel: () => close(false),
+      actions: [
+        dialogButton("Отмена", onPressed: () => close(false), isOutline: true),
+        dialogButton("Отправить", onPressed: sending ? null : submit),
+      ],
+    );
+  });
+}
+'''
+    if not src.rstrip().endswith("}"):
+        src += "\n"
+    src += helper
+
+    f.write_text(src, encoding="utf-8")
+    print("support dialog: link + dialog injected")
+
+
 def main():
     if not Path("flutter").is_dir():
         sys.exit("error: run from rustdesk/ root (no flutter/ dir here)")
@@ -194,6 +344,7 @@ def main():
     patch_user_model_oidc()
     patch_login_register_button()
     patch_main_window_icon()
+    patch_support_dialog()
     print("=== branding patches done ===")
 
 
