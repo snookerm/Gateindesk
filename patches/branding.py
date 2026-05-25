@@ -456,12 +456,21 @@ def patch_support_dialog():
 // Returns null if nothing found or error.
 String? _collectGateInDeskLogs() {
   try {
-    final appData = Platform.environment['APPDATA']
-        ?? Platform.environment['HOME']
-        ?? '';
-    if (appData.isEmpty) return null;
-    final logDir = Directory('\\$appData\\\\GateInDesk\\\\log');
-    if (!logDir.existsSync()) return null;
+    // Use String.fromEnvironment-style lookups via Platform.environment.
+    // No Dart $-interpolation here — build path via simple concat to avoid
+    // any escaping pitfalls when this code goes through patches/branding.py.
+    String? appData = Platform.environment['APPDATA'];
+    appData ??= Platform.environment['HOME'];
+    if (appData == null || appData.isEmpty) return null;
+
+    final appName = bind.mainGetAppNameSync();  // "GateInDesk"
+    final sep = Platform.pathSeparator;
+    final logDir = Directory(appData + sep + appName + sep + 'log');
+    debugPrint('GD logs: scanning ' + logDir.path);
+    if (!logDir.existsSync()) {
+      debugPrint('GD logs: dir not found');
+      return null;
+    }
 
     // Pick last 5 log files by modification time (newest first).
     final files = logDir
@@ -471,6 +480,7 @@ String? _collectGateInDeskLogs() {
         .toList()
       ..sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
     final picked = files.take(5).toList();
+    debugPrint('GD logs: picked ' + picked.length.toString() + ' files');
     if (picked.isEmpty) return null;
 
     final buf = StringBuffer();
@@ -478,24 +488,27 @@ String? _collectGateInDeskLogs() {
     for (final f in picked) {
       if (buf.length >= maxBytes) break;
       try {
-        final name = f.path.split(Platform.pathSeparator).last;
-        buf.writeln('=== FILE: \\$name (\\${f.statSync().size} bytes, mod \\${f.statSync().modified.toIso8601String()}) ===');
+        final name = f.path.split(sep).last;
+        final st = f.statSync();
+        buf.writeln('=== FILE: ' + name + ' (' + st.size.toString() + ' bytes, mod ' + st.modified.toIso8601String() + ') ===');
         final content = f.readAsStringSync();
         final remaining = maxBytes - buf.length;
         if (content.length > remaining) {
-          buf.writeln('[truncated to \\$remaining bytes]');
+          buf.writeln('[truncated to ' + remaining.toString() + ' bytes]');
           buf.write(content.substring(0, remaining));
         } else {
           buf.write(content);
         }
-        buf.writeln('\\n');
+        buf.writeln('');
       } catch (_) {
         // skip unreadable
       }
     }
-    return buf.toString();
+    final result = buf.toString();
+    debugPrint('GD logs: collected ' + result.length.toString() + ' chars');
+    return result;
   } catch (e) {
-    debugPrint('_collectGateInDeskLogs failed: \\$e');
+    debugPrint('GD logs: failed: ' + e.toString());
     return null;
   }
 }

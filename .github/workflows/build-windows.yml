@@ -18,7 +18,7 @@ env:
   RUSTDESK_REV: "1.4.6"
   # GateInDesk own semver — bump THIS for releases. Updated on Cargo.toml,
   # pubspec.yaml, MSI filename, Release tag, deploy URL. One source of truth.
-  GD_VERSION: "1.0.2"
+  GD_VERSION: "1.0.3"
   FLUTTER_VERSION: "3.24.5"
   BRIDGE_FLUTTER_VERSION: "3.22.3"
   RUST_VERSION: "1.75"
