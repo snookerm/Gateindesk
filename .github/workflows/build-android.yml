@@ -210,13 +210,19 @@ jobs:
           # falls back to admin.rustdesk.com and shows RustDesk OAuth.
           sed -i "s|PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(\"\".to_owned())|PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(\"${SERVER}\".to_owned())|" "$F"
           grep -q "PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(\"${SERVER}\"" "$F"             || { echo "::error::PROD_RENDEZVOUS_SERVER hardcode failed"; exit 1; }
-          # Belt-and-suspenders: replace admin.rustdesk.com fallback in common.rs.
+          # Hardcode get_api_server_() to return our API directly,
+          # bypassing port-derivation (which would produce http://relay:21114
+          # — wrong protocol/host for our HTTPS api on api.azatmutq.com).
           if [ -n "$API" ]; then
             sed -i "s|\"https://admin.rustdesk.com\"|\"${API}\"|g" src/common.rs
-            grep -q "${API}" src/common.rs               || { echo "::error::api fallback patch failed"; exit 1; }
-            echo "api fallback in common.rs patched -> ${API}"
+            # Force early-return: rewrite the fn header so get_api_server_
+            # always returns $API and ignores params (suppress unused warnings).
+            sed -i "s|fn get_api_server_(api: String, custom: String) -> String {|fn get_api_server_(api: String, custom: String) -> String { let _ = (api, custom); return \"${API}\".to_owned();|" src/common.rs
+            grep -q "let _ = (api, custom); return \"${API}\"" src/common.rs               || { echo "::error::get_api_server_ early-return patch failed"; exit 1; }
+            echo "get_api_server_ hardcoded -> ${API}"
           else
-            echo "::warning::API_SERVER secret empty - admin.rustdesk.com fallback left as-is"
+            echo "::warning::API_SERVER secret empty - common.rs not patched (will fall back to formed http://relay:21114 which is wrong for us)"
+            exit 1
           fi
           # Fallback APP_NAME — drives bind.mainGetAppNameSync() when
           # custom.txt isn't loaded. On Android, Rust load_custom_client()
