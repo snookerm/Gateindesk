@@ -27,7 +27,11 @@ env:
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   APP_NAME: "GateInDesk"
-  ANDROID_PACKAGE: "com.gateinweb.gateindesk"
+  # NOTE: applicationId (Play Store / unique install ID, user-visible in Settings)
+  # ONLY. The Android namespace `package="com.carriez.flutter_hbb"` MUST stay —
+  # Kotlin source under kotlin/com/carriez/flutter_hbb/ imports the auto-generated
+  # R class via that namespace. Renaming requires full Kotlin source migration.
+  ANDROID_APPLICATION_ID: "com.gateinweb.gateindesk"
 
 jobs:
   generate-bridge:
@@ -240,7 +244,6 @@ jobs:
             for size_name in "ic_launcher" "ic_launcher_round" "ic_stat_logo"; do
               DST="flutter/android/app/src/main/res/mipmap-${dpi}/${size_name}.png"
               if [ -f "$DST" ]; then
-                # Resize to original file's pixel size (extract via identify)
                 W=$(identify -format "%w" "$DST" 2>/dev/null || echo 0)
                 if [ "$W" -gt 0 ]; then
                   convert "$PNG" -resize "${W}x${W}" "$DST"
@@ -248,7 +251,6 @@ jobs:
               fi
             done
           done
-          # Foreground for adaptive icon (mipmap-anydpi-v26 references it)
           for dpi in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
             DST="flutter/android/app/src/main/res/mipmap-${dpi}/ic_launcher_foreground.png"
             if [ -f "$DST" ]; then
@@ -283,27 +285,32 @@ jobs:
           python3 ../meta/patches/branding.py
           echo "branding patches applied"
 
-      - name: Patch AndroidManifest + strings (app label + package)
+      - name: Patch Android labels + applicationId (NOT package — see env note)
         shell: bash
         run: |
           set -e
           cd rustdesk
           MANIFEST=flutter/android/app/src/main/AndroidManifest.xml
           STRINGS=flutter/android/app/src/main/res/values/strings.xml
-          # Replace package + applicationId in AndroidManifest
-          sed -i 's|package="com\.carriez\.flutter_hbb"|package="${{ env.ANDROID_PACKAGE }}"|g' "$MANIFEST" || true
-          sed -i 's|android:label="RustDesk"|android:label="GateInDesk"|g' "$MANIFEST" || true
-          # Patch build.gradle applicationId
           GRADLE=flutter/android/app/build.gradle
-          sed -i 's|applicationId "com\.carriez\.flutter_hbb"|applicationId "${{ env.ANDROID_PACKAGE }}"|g' "$GRADLE" || true
+
+          # User-facing label on home screen + launcher
+          sed -i 's|android:label="RustDesk"|android:label="GateInDesk"|g' "$MANIFEST" || true
           # Strings: app_name → GateInDesk
           if [ -f "$STRINGS" ]; then
             sed -i 's|<string name="app_name">RustDesk</string>|<string name="app_name">GateInDesk</string>|g' "$STRINGS"
           fi
-          echo "=== AndroidManifest after patch ==="
-          grep -E "package|android:label" "$MANIFEST" | head -5
+          # applicationId (install ID in Play Store / Settings → App info).
+          # The internal namespace `package="com.carriez.flutter_hbb"` stays —
+          # changing it would break Kotlin imports of com.carriez.flutter_hbb.R.
+          sed -i 's|applicationId "com\.carriez\.flutter_hbb"|applicationId "${{ env.ANDROID_APPLICATION_ID }}"|g' "$GRADLE" || true
+
+          echo "=== AndroidManifest android:label ==="
+          grep "android:label" "$MANIFEST" | head -3
           echo "=== build.gradle applicationId ==="
           grep applicationId "$GRADLE" | head -3
+          echo "=== AndroidManifest package (must remain com.carriez.flutter_hbb) ==="
+          grep "package=" "$MANIFEST" | head -3
 
       - name: Install Rust toolchain (Android target)
         uses: dtolnay/rust-toolchain@v1
@@ -330,7 +337,6 @@ jobs:
           mkdir -p ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_abi }}
           cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so \
              ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_abi }}/librustdesk.so
-          # Copy libc++_shared.so from NDK sysroot
           cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.job.sysroot_dir }}/libc++_shared.so \
              ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_abi }}/
           ls -la ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_abi }}/
@@ -343,9 +349,7 @@ jobs:
           set -e
           cd rustdesk
           export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
-          # Increase Gradle JVM memory
           sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
-          # Use debug keystore (no release ANDROID_SIGNING_KEY secret yet)
           sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
           cd flutter
           flutter build apk --release --target-platform ${{ matrix.job.flutter_platform }} --split-per-abi
