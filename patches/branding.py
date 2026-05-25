@@ -188,42 +188,25 @@ def patch_login_register_button():
 
 
 def patch_support_dialog():
-    """Add 'Служба поддержки' link in About dialog + popup with
-    name/email/phone/message form posting to https://api.azatmutq.com/api/support."""
-    f = Path("flutter/lib/desktop/pages/desktop_setting_page.dart")
+    """Inject the support dialog implementation into common.dart so it can
+    be invoked from anywhere (sidebar, About, etc).
+
+    Sidebar link is added separately by patch_support_link_in_sidebar.
+    No link in About — user wants it under update banner in sidebar.
+    """
+    f = Path("flutter/lib/common.dart")
     src = f.read_text(encoding="utf-8")
     if "showGateInDeskSupportDialog" in src:
-        print("support dialog: skip (already injected)")
+        print("support dialog: skip (already injected in common.dart)")
         return
 
-    # 1. Add InkWell link right after our 'Личный кабинет' (or before Website if absent)
-    anchor = """InkWell(
-                  onTap: () {
-                    launchUrlString('https://gateindesk.azatmutq.com');
-                  },
-                  child: Text(
-                    translate('Website'),"""
-    if anchor not in src:
-        print("support dialog: skip (Website anchor not found)")
-        return
-
-    support_link = """InkWell(
-                  onTap: () => showGateInDeskSupportDialog(context),
-                  child: Text(
-                    'Служба поддержки',
-                    style: linkStyle,
-                  ).marginSymmetric(vertical: 4.0)),
-              """ + anchor
-    src = src.replace(anchor, support_link)
-
-    # 2. Ensure http_service import is present
+    # Ensure http_service import is present (already used elsewhere via 'http')
     if "as gd_http;" not in src:
         first_import = src.find("import ")
         src = src[:first_import] + (
-            "import 'package:flutter_hbb/utils/http_service.dart' as gd_http;\n"
+            "import 'utils/http_service.dart' as gd_http;\n"
         ) + src[first_import:]
 
-    # 3. Append the dialog implementation at the end of the file (top-level)
     helper = '''
 
 // ────────────────────────────────────────────────────────────────────
@@ -334,7 +317,54 @@ void showGateInDeskSupportDialog(BuildContext context) {
     src += helper
 
     f.write_text(src, encoding="utf-8")
-    print("support dialog: link + dialog injected")
+    print("support dialog: implementation injected in common.dart")
+
+
+def patch_support_link_in_sidebar():
+    """Insert 'Служба поддержки' link in the desktop home left pane,
+    right under loadPowered (where the 'Работает на GateInDesk' hint sits).
+    The built-in `buildHelpCards(stateGlobal.updateUrl.value)` already
+    renders the update banner — Support sits between Powered and update.
+    """
+    f = Path("flutter/lib/desktop/pages/desktop_home_page.dart")
+    src = f.read_text(encoding="utf-8")
+    if "showGateInDeskSupportDialog" in src:
+        print("sidebar Support: skip (already injected)")
+        return
+
+    anchor = """      if (bind.isCustomClient())
+        Align(
+          alignment: Alignment.center,
+          child: loadPowered(context),
+        ),"""
+
+    if anchor not in src:
+        print("sidebar Support: skip (loadPowered anchor not found)")
+        return
+
+    inject = anchor + """
+      // Service support link — opens GateInDesk support dialog.
+      Align(
+        alignment: Alignment.center,
+        child: Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: InkWell(
+            onTap: () => showGateInDeskSupportDialog(context),
+            child: Text(
+              'Служба поддержки',
+              style: TextStyle(
+                fontSize: 10,
+                decoration: TextDecoration.underline,
+                color: Theme.of(context).textTheme.bodySmall?.color,
+              ),
+            ),
+          ),
+        ),
+      ),"""
+
+    src = src.replace(anchor, inject)
+    f.write_text(src, encoding="utf-8")
+    print("sidebar Support: link injected under loadPowered")
 
 
 def main():
@@ -345,6 +375,7 @@ def main():
     patch_login_register_button()
     patch_main_window_icon()
     patch_support_dialog()
+    patch_support_link_in_sidebar()
     print("=== branding patches done ===")
 
 
