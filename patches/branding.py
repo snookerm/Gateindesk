@@ -66,6 +66,83 @@ def patch_user_model_oidc():
     print("user_model.dart: common-oidc/null guard added")
 
 
+def patch_remove_update_guard_dart():
+    """RustDesk has TWO is_custom_client guards for update checks:
+    one in Rust (common.rs check_software_update — handled by
+    patch_remove_update_guard) AND one in Dart (common.dart:3976-3991
+    checkUpdate). The Dart one blocks the actual call to
+    mainGetSoftwareUpdateUrl, so even with Rust patched the function
+    never fires. Found 2026-05-25 after empirical test on user machine
+    showed 0 TCP connections to api.azatmutq.com.
+    """
+    f = Path("flutter/lib/common.dart")
+    src = f.read_text(encoding="utf-8")
+    needle = (
+        "void checkUpdate() {\n"
+        "  if (!isWeb) {\n"
+        "    if (!bind.isCustomClient()) {\n"
+    )
+    if needle not in src:
+        if "if (!isWeb) {\n    platformFFI.registerEventHandler" in src:
+            print("update guard (Dart): skip (already removed)")
+        else:
+            print("update guard (Dart): skip (anchor not found)")
+        return
+    # Replace: drop the inner `if (!bind.isCustomClient()) {` and its closing brace.
+    # Original:
+    #   if (!isWeb) {
+    #     if (!bind.isCustomClient()) {
+    #       platformFFI.registerEventHandler(...);
+    #       Timer(...);
+    #     }
+    #   }
+    # Patched:
+    #   if (!isWeb) {
+    #     platformFFI.registerEventHandler(...);
+    #     Timer(...);
+    #   }
+    old_block = (
+        "void checkUpdate() {\n"
+        "  if (!isWeb) {\n"
+        "    if (!bind.isCustomClient()) {\n"
+        "      platformFFI.registerEventHandler(\n"
+        "          kCheckSoftwareUpdateFinish, kCheckSoftwareUpdateFinish,\n"
+        "          (Map<String, dynamic> evt) async {\n"
+        "        if (evt['url'] is String) {\n"
+        "          stateGlobal.updateUrl.value = evt['url'];\n"
+        "        }\n"
+        "      });\n"
+        "      Timer(const Duration(seconds: 1), () async {\n"
+        "        bind.mainGetSoftwareUpdateUrl();\n"
+        "      });\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    new_block = (
+        "void checkUpdate() {\n"
+        "  if (!isWeb) {\n"
+        "    platformFFI.registerEventHandler(\n"
+        "        kCheckSoftwareUpdateFinish, kCheckSoftwareUpdateFinish,\n"
+        "        (Map<String, dynamic> evt) async {\n"
+        "      if (evt['url'] is String) {\n"
+        "        stateGlobal.updateUrl.value = evt['url'];\n"
+        "      }\n"
+        "    });\n"
+        "    Timer(const Duration(seconds: 1), () async {\n"
+        "      bind.mainGetSoftwareUpdateUrl();\n"
+        "    });\n"
+        "  }\n"
+        "}\n"
+    )
+    if old_block not in src:
+        print("update guard (Dart): skip (block anchor not found — upstream changed?)")
+        return
+    src = src.replace(old_block, new_block, 1)
+    f.write_text(src, encoding="utf-8")
+    print("update guard (Dart): isCustomClient block removed")
+
+
 def patch_remove_update_guard():
     """Remove `if is_custom_client() { return; }` guard at the top of
     check_software_update so OUR fork actually polls /api/version/latest.
@@ -449,6 +526,7 @@ def main():
     patch_user_model_oidc()
     patch_login_register_button()
     patch_remove_update_guard()
+    patch_remove_update_guard_dart()
     patch_main_window_icon()
     patch_support_dialog()
     patch_support_link_in_sidebar()
