@@ -7,17 +7,24 @@ on:
         description: 'Release tag (e.g. nightly, v1.0.0)'
         type: string
         default: 'nightly'
+      skip_version_bump:
+        description: 'Skip bumping Cargo/pubspec versions AND /api/version/latest endpoint (for infra-only rebuilds where installed clients should NOT get a banner)'
+        type: boolean
+        default: false
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE*'
+    paths:
+      - '.github/workflows/build-windows.yml'
+      - 'patches/branding.py'
+      - 'patches/branding/**'
 
 env:
-  # Upstream RustDesk tag we clone from (do NOT bump unless taking newer upstream)
   RUSTDESK_REV: "1.4.6"
   # GateInDesk own semver — bump THIS for releases. Updated on Cargo.toml,
-  # pubspec.yaml, MSI filename, Release tag, deploy URL. One source of truth.
+  # pubspec.yaml, MSI filename, Release tag, deploy URL.
+  # When workflow_dispatch input skip_version_bump=true, this is IGNORED at the
+  # Set version step (binary stays on RUSTDESK_REV) and the /api/version/latest
+  # endpoint is NOT updated — useful for infra-only rebuilds.
   GD_VERSION: "1.0.7"
   FLUTTER_VERSION: "3.24.5"
   BRIDGE_FLUTTER_VERSION: "3.22.3"
@@ -174,6 +181,7 @@ jobs:
           echo "config.rs fallback patched OK"
 
       - name: Set GateInDesk version (Cargo.toml + Flutter pubspec)
+        if: ${{ inputs.skip_version_bump != true }}
         shell: bash
         run: |
           set -e
@@ -223,21 +231,14 @@ jobs:
           set -e
           cd rustdesk
 
-          # 1. "Powered by RustDesk" hint top-left
           sed -i 's|"powered_by_me", "Powered by RustDesk"|"powered_by_me", "Powered by GateInDesk"|' src/lang/en.rs
           sed -i 's|"powered_by_me", "Основано на RustDesk"|"powered_by_me", "Работает на GateInDesk"|' src/lang/ru.rs
 
-          # 1a. Auto-update version-check URL (Rust-side, in hbb_common).
           sed -i 's|https://api.rustdesk.com/version/latest|https://api.azatmutq.com/api/version/latest|' libs/hbb_common/src/lib.rs
 
-          # 2. Footer banner text (URL itself is also handled by the global sweep below).
           sed -i 's|"setup_server_tip", "For faster connection, please set up your own server"|"setup_server_tip", "Open your personal account"|' src/lang/en.rs
           sed -i 's|"setup_server_tip", "Для более быстрого подключения настройте собственный сервер."|"setup_server_tip", "Откройте личный кабинет"|' src/lang/ru.rs
 
-          # 3. GLOBAL Dart URL sweep — replace ALL rustdesk.com user-facing URLs
-          #    across the entire Flutter codebase. Was per-file before and missed
-          #    install_page.dart (EULA link), mobile/settings_page.dart, Tooltip
-          #    message strings. Keep /docs/* untouched (no docs site yet).
           find flutter/lib -name '*.dart' -exec sed -i \
             "s|https://rustdesk.com/privacy.html|https://gateindesk.azatmutq.com/privacy.html|g" {} +
           find flutter/lib -name '*.dart' -exec sed -i \
@@ -251,7 +252,6 @@ jobs:
           find flutter/lib -name '*.dart' -exec sed -i \
             's|"https://rustdesk.com"|"https://gateindesk.azatmutq.com"|g' {} +
 
-          # Sanity check — any remaining non-docs/non-comment rustdesk.com is a regression.
           LEFT=$(grep -rE "rustdesk\.com[^/]" flutter/lib --include='*.dart' \
             | grep -v "/docs/" | grep -v "^\s*//" | wc -l)
           echo "remaining non-docs/non-comment rustdesk.com refs in Dart: $LEFT"
@@ -260,21 +260,16 @@ jobs:
             grep -rE "rustdesk\.com[^/]" flutter/lib --include='*.dart' | grep -v "/docs/" | grep -v "^\s*//"
           fi
 
-          # 4. Copyright Purslane Ltd -> GateInWeb
           sed -i 's|Purslane Ltd|GateInWeb|g' flutter/lib/desktop/pages/desktop_setting_page.dart
 
-          # 5. Slogan_tip -> our slogan
           sed -i 's|"Slogan_tip", "Made with heart in this chaotic world!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/en.rs
           sed -i 's|"Slogan_tip", "Сделано с душой в этом безумном мире!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/ru.rs
 
-          # 6. install_tip UAC text — replace RustDesk -> GateInDesk
           sed -i 's|RustDesk can not work properly|GateInDesk can not work properly|' src/lang/en.rs
           sed -i 's|click the button below to install RustDesk|click the button below to install GateInDesk|' src/lang/en.rs
           sed -i 's|RustDesk может работать неправильно|GateInDesk может работать неправильно|' src/lang/ru.rs
           sed -i 's|для установки RustDesk в системе|для установки GateInDesk в системе|' src/lang/ru.rs
 
-          # 7. Multi-line inserts (About link / register button / oidc guard)
-          #    are in a separate Python script to avoid heredoc-in-YAML escaping.
           python3 ../meta/patches/branding.py
 
           echo "all branding patches applied"
@@ -388,15 +383,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Set-Location rustdesk
 
-          # 1) Snapshot the Flutter Release folder + custom.txt for portable use.
-          #    MSI preprocess writes into ./gateindesk/, so we use a sibling copy.
           Copy-Item -Recurse -Force ./gateindesk ./gateindesk-portable
           Write-Host "=== portable snapshot ==="
           Get-ChildItem ./gateindesk-portable | Select-Object Name,Length | Format-Table -AutoSize
 
-          # 2) Rebrand the portable packer's local-extract dir:
-          #    libs/portable/src/main.rs uses APP_PREFIX = "rustdesk" which
-          #    becomes %LOCALAPPDATA%/rustdesk/<ts>/. Force gateindesk.
           $portableMain = "libs/portable/src/main.rs"
           (Get-Content -Raw $portableMain) `
             -replace 'const APP_PREFIX: &str = "rustdesk";', 'const APP_PREFIX: &str = "gateindesk";' `
@@ -404,16 +394,12 @@ jobs:
           Write-Host "=== APP_PREFIX patched ==="
           Select-String -Path $portableMain -Pattern "APP_PREFIX"
 
-          # 3) Pack: brotli-compress the gateindesk-portable/ folder into data.bin
           Push-Location libs/portable
           pip install -r requirements.txt
           python3 .\generate.py -f ../../gateindesk-portable -o . -e "./$($env:APP_NAME).exe"
-
-          # 4) Compile the packer binary — it embeds data.bin + extracts at runtime.
           cargo build --release
           Pop-Location
 
-          # 5) Move output to SignOutput with our naming convention.
           New-Item -ItemType Directory -Force -Path ./SignOutput | Out-Null
           $packerExe = "./target/release/rustdesk-portable-packer.exe"
           if (-not (Test-Path $packerExe)) {
@@ -517,7 +503,7 @@ jobs:
           files: rustdesk/SignOutput/*
 
       - name: Deploy MSI + Portable to VPS + bump version endpoint
-        if: env.VPS_KEY != ''
+        if: ${{ env.VPS_KEY != '' && inputs.skip_version_bump != true }}
         env:
           VPS_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: claude-relay@78.24.218.158
@@ -536,7 +522,6 @@ jobs:
           PORTABLE_DIR="/opt/mirrors/gateindesk/portable/v${GD_VERSION}"
           REMOTE_LATEST="/opt/mirrors/gateindesk"
 
-          # 1) Upload MSI to /v{V}/ + Portable to /portable/v{V}/
           ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo mkdir -p $INSTALLER_DIR $PORTABLE_DIR && sudo chown -R claude-relay:claude-relay /opt/mirrors/gateindesk/v${GD_VERSION} /opt/mirrors/gateindesk/portable"
           scp -i ~/.ssh/deploy_key -P $VPS_PORT "$MSI"    "$VPS_HOST:$INSTALLER_DIR/"
           scp -i ~/.ssh/deploy_key -P $VPS_PORT "$QS_EXE" "$VPS_HOST:$PORTABLE_DIR/"
@@ -544,15 +529,37 @@ jobs:
             "sudo chown www-data:www-data $INSTALLER_DIR/*.msi $PORTABLE_DIR/*.exe && \
              sudo chmod 644 $INSTALLER_DIR/*.msi $PORTABLE_DIR/*.exe"
 
-          # 2) Bump /api/version/latest JSON in nginx (semver, no 'v' prefix).
           NEW_JSON="{\"version\":\"${GD_VERSION}\",\"url\":\"https://github.com/snookerm/Gateindesk/releases/tag/${GD_VERSION}\"}"
           ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo sed -i 's|return 200 .*|return 200 '\''${NEW_JSON}'\'';|' /etc/nginx/sites-available/api.azatmutq.com && sudo nginx -t && sudo systemctl reload nginx"
 
-          # 3) Mirror root copies for backward-compat (download page expects them under root)
           ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo cp $INSTALLER_DIR/*.msi $REMOTE_LATEST/${APP_NAME}-${GD_VERSION}-x86_64.msi"
 
-          # 4) Smoke-test version endpoint
           DEPLOYED=$(curl -s -X POST https://api.azatmutq.com/api/version/latest -H 'Content-Type: application/json' -d '{}')
           echo "deployed: $DEPLOYED"
           echo "$DEPLOYED" | grep -q "${GD_VERSION}" || { echo "::error::version not reflected"; exit 1; }
           echo "deploy OK: v${GD_VERSION} MSI + Portable QS live on download.azatmutq.com/gateindesk/"
+
+      - name: Deploy MSI + Portable to VPS (skip version bump)
+        if: ${{ env.VPS_KEY != '' && inputs.skip_version_bump == true }}
+        env:
+          VPS_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: claude-relay@78.24.218.158
+          VPS_PORT: 22
+        shell: bash
+        run: |
+          set -e
+          mkdir -p ~/.ssh
+          echo "$VPS_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${VPS_PORT} -H 78.24.218.158 >> ~/.ssh/known_hosts 2>/dev/null
+
+          # skip_version_bump=true: artifacts retain upstream version (1.4.6).
+          # Upload to dedicated /infra-rebuild/ folder so they don't overwrite numbered releases.
+          MSI=$(ls rustdesk/SignOutput/*.msi | head -1)
+          QS_EXE=$(ls rustdesk/SignOutput/*.exe | head -1)
+          REMOTE_DIR="/opt/mirrors/gateindesk/infra-rebuild"
+
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo mkdir -p $REMOTE_DIR && sudo chown -R claude-relay:claude-relay $REMOTE_DIR"
+          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$MSI"    "$VPS_HOST:$REMOTE_DIR/"
+          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$QS_EXE" "$VPS_HOST:$REMOTE_DIR/"
+          echo "infra-rebuild artifacts uploaded to $REMOTE_DIR (version endpoint NOT bumped — installed clients won't see banner)"
