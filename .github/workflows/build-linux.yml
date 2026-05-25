@@ -112,6 +112,7 @@ jobs:
           [ -z "$RENDEZVOUS_SERVER" ] && { echo "::error::RENDEZVOUS_SERVER not set"; missing=1; }
           [ -z "$RS_PUB_KEY" ] && { echo "::error::RS_PUB_KEY not set"; missing=1; }
           [ "$missing" = "1" ] && exit 1
+          echo "all required secrets present"
 
       - name: Maximize build space
         run: |
@@ -228,7 +229,6 @@ jobs:
           cp ../meta/patches/branding/logo.png flutter/assets/logo.png
           cp ../meta/patches/branding/icon.svg flutter/assets/icon.svg
           cp ../meta/patches/branding/icon.ico res/icon.ico 2>/dev/null || true
-          # Linux uses res/128x128.png and res/icons/ for various sizes
           PNG="../meta/patches/branding/logo.png"
           if [ -f res/128x128.png ]; then
             convert "$PNG" -resize 128x128 res/128x128.png
@@ -270,11 +270,8 @@ jobs:
         run: |
           set -e
           cd rustdesk
-          # Disable rust bridge build, keep only cdylib (saves time)
           sed -i 's/\["cdylib", "staticlib", "rlib"\]/\["cdylib"\]/g' Cargo.toml
-          # build.py for Linux: no --vram (Windows-only)
           python3 ./build.py --flutter --hwcodec --unix-file-copy-paste
-          # Result: ./target/release/rustdesk binary
           ls -la ./target/release/rustdesk 2>&1 || echo "binary missing"
 
       - name: Inject custom.txt + create DEB package
@@ -287,7 +284,6 @@ jobs:
           cd rustdesk
           mkdir -p SignOutput
 
-          # Generate custom.txt content (Linux uses /usr/share/<app>/custom.txt)
           SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
           KEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
           python3 -c "
@@ -311,8 +307,6 @@ jobs:
           print(f'custom.txt: {len(enc)} bytes')
           "
 
-          # Build DEB package manually (upstream uses build.py --package).
-          # Use a simple debian package structure.
           PKG_DIR=/tmp/gateindesk-deb
           rm -rf "$PKG_DIR"
           mkdir -p "$PKG_DIR/DEBIAN"
@@ -320,18 +314,14 @@ jobs:
           mkdir -p "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
           mkdir -p "$PKG_DIR/usr/share/${APP_NAME,,}"
 
-          # Binary
           cp ./target/release/rustdesk "$PKG_DIR/usr/bin/${APP_NAME,,}"
           chmod 755 "$PKG_DIR/usr/bin/${APP_NAME,,}"
 
-          # custom.txt next to binary AND in /usr/share
           cp /tmp/custom.txt "$PKG_DIR/usr/share/${APP_NAME,,}/custom.txt"
 
-          # Icon
           convert ../meta/patches/branding/logo.png -resize 256x256 \
             "$PKG_DIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME,,}.png"
 
-          # Desktop entry
           cat > "$PKG_DIR/usr/share/applications/${APP_NAME,,}.desktop" <<EOF
           [Desktop Entry]
           Name=${APP_NAME}
@@ -344,7 +334,6 @@ jobs:
           StartupNotify=true
           EOF
 
-          # DEBIAN control
           cat > "$PKG_DIR/DEBIAN/control" <<EOF
           Package: ${APP_NAME,,}
           Version: ${GD_VERSION}
@@ -359,7 +348,6 @@ jobs:
            solution with branded UI and integrated billing.
           EOF
 
-          # Build .deb
           DEB_OUT="SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.deb"
           dpkg-deb --build --root-owner-group "$PKG_DIR" "$DEB_OUT"
           ls -la "$DEB_OUT"
@@ -371,17 +359,14 @@ jobs:
           set -e
           cd rustdesk
 
-          # Use appimagetool from official AppImageKit
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
 
-          # Extract DEB into AppDir
           APPDIR=/tmp/AppDir
           rm -rf "$APPDIR"
           mkdir -p "$APPDIR"
           dpkg-deb -x SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.deb "$APPDIR"
 
-          # AppRun launcher script
           cat > "$APPDIR/AppRun" <<EOF
           #!/bin/bash
           HERE="\$(dirname "\$(readlink -f "\$0")")"
@@ -390,12 +375,10 @@ jobs:
           EOF
           chmod +x "$APPDIR/AppRun"
 
-          # Top-level .desktop + icon (required by appimagetool)
           cp "$APPDIR/usr/share/applications/${APP_NAME,,}.desktop" "$APPDIR/"
           cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME,,}.png" "$APPDIR/${APP_NAME,,}.png"
           cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME,,}.png" "$APPDIR/.DirIcon"
 
-          # Build AppImage
           ARCH=x86_64 ./appimagetool-x86_64.AppImage --no-appstream "$APPDIR" \
             "SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.AppImage"
           chmod +x "SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.AppImage"
