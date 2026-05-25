@@ -348,10 +348,10 @@ void showGateInDeskSupportDialog(BuildContext context) {
 
 
 def patch_support_link_in_sidebar():
-    """Insert 'Служба поддержки' link in the desktop home left pane,
-    right under loadPowered (where the 'Работает на GateInDesk' hint sits).
-    The built-in `buildHelpCards(stateGlobal.updateUrl.value)` already
-    renders the update banner — Support sits between Powered and update.
+    """Insert a prominent 'Служба поддержки' button card in the desktop
+    home left pane, right after the built-in buildHelpCards (which renders
+    the update banner). The Support card uses the same visual style as
+    Material card buttons — icon + text, full-width, easy to spot.
     """
     f = Path("flutter/lib/desktop/pages/desktop_home_page.dart")
     src = f.read_text(encoding="utf-8")
@@ -359,39 +359,87 @@ def patch_support_link_in_sidebar():
         print("sidebar Support: skip (already injected)")
         return
 
-    anchor = """      if (bind.isCustomClient())
-        Align(
-          alignment: Alignment.center,
-          child: loadPowered(context),
-        ),"""
+    # Anchor: end of buildHelpCards FutureBuilder block + start of buildPluginEntry.
+    # Inject our Support card between them.
+    anchor = """      FutureBuilder<Widget>(
+        future: Future.value(
+            Obx(() => buildHelpCards(stateGlobal.updateUrl.value))),
+        builder: (_, data) {
+          if (data.hasData) {
+            if (isIncomingOnly) {
+              if (isInHomePage()) {
+                Future.delayed(Duration(milliseconds: 300), () {
+                  _updateWindowSize();
+                });
+              }
+            }
+            return data.data!;
+          } else {
+            return const Offstage();
+          }
+        },
+      ),
+      buildPluginEntry(),"""
 
     if anchor not in src:
-        print("sidebar Support: skip (loadPowered anchor not found)")
+        print("sidebar Support: skip (buildHelpCards anchor not found)")
         return
 
-    inject = anchor + """
-      // Service support link — opens GateInDesk support dialog.
-      Align(
-        alignment: Alignment.center,
-        child: Padding(
-          padding: const EdgeInsets.only(top: 4),
+    # Prominent Support card — Material card style, full-width, icon+text.
+    # Sits between update banner and plugin entry → always visible.
+    support_card = """      FutureBuilder<Widget>(
+        future: Future.value(
+            Obx(() => buildHelpCards(stateGlobal.updateUrl.value))),
+        builder: (_, data) {
+          if (data.hasData) {
+            if (isIncomingOnly) {
+              if (isInHomePage()) {
+                Future.delayed(Duration(milliseconds: 300), () {
+                  _updateWindowSize();
+                });
+              }
+            }
+            return data.data!;
+          } else {
+            return const Offstage();
+          }
+        },
+      ),
+      // GateInDesk support card — always visible, opens form dialog.
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Material(
+          color: Color(0xFFEFF4FF),
+          borderRadius: BorderRadius.circular(8),
           child: InkWell(
+            borderRadius: BorderRadius.circular(8),
             onTap: () => showGateInDeskSupportDialog(context),
-            child: Text(
-              'Служба поддержки',
-              style: TextStyle(
-                fontSize: 10,
-                decoration: TextDecoration.underline,
-                color: Theme.of(context).textTheme.bodySmall?.color,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.support_agent, color: Color(0xFF0071FF), size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Служба поддержки',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Color(0xFF0071FF),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
         ),
-      ),"""
+      ),
+      buildPluginEntry(),"""
 
-    src = src.replace(anchor, inject)
+    src = src.replace(anchor, support_card)
     f.write_text(src, encoding="utf-8")
-    print("sidebar Support: link injected under loadPowered")
+    print("sidebar Support: prominent card injected below update banner")
 
 
 def main():
