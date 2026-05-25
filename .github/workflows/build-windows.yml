@@ -29,7 +29,9 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   APP_NAME: "GateInDesk"
   MANUFACTURER: "GateInWeb"
-  TAG_NAME: "${{ inputs.upload-tag || format('v{0}', env.GD_VERSION) }}"
+  # NOTE: env block cannot reference its own keys (env.GD_VERSION is empty here).
+  # Set TAG_NAME on workflow_dispatch input or derive at job-level (see below).
+  TAG_NAME: "${{ inputs.upload-tag || '' }}"
 
   # Required repository secrets:
   #   RENDEZVOUS_SERVER  e.g. relay.example.com (no port)
@@ -514,15 +516,15 @@ jobs:
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.TAG_NAME }}
-          prerelease: ${{ env.TAG_NAME == 'nightly' }}
+          tag_name: ${{ inputs.upload-tag || format('v{0}', env.GD_VERSION) }}
+          prerelease: false
           files: rustdesk/SignOutput/*
 
       # Auto-deploy MSI to download.azatmutq.com + update version endpoint.
       # Skipped silently if VPS_SSH_KEY secret is not configured — manual
       # deploy step remains an option.
       - name: Deploy MSI to VPS + bump version endpoint
-        if: env.TAG_NAME != 'nightly' && env.VPS_KEY != ''
+        if: env.VPS_KEY != ''
         env:
           VPS_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: claude-relay@78.24.218.158
