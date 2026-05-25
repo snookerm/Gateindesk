@@ -27,10 +27,6 @@ env:
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   APP_NAME: "GateInDesk"
-  # NOTE: applicationId (Play Store / unique install ID, user-visible in Settings)
-  # ONLY. The Android namespace `package="com.carriez.flutter_hbb"` MUST stay —
-  # Kotlin source under kotlin/com/carriez/flutter_hbb/ imports the auto-generated
-  # R class via that namespace. Renaming requires full Kotlin source migration.
   ANDROID_APPLICATION_ID: "com.gateinweb.gateindesk"
 
 jobs:
@@ -238,7 +234,6 @@ jobs:
           cd rustdesk
           cp ../meta/patches/branding/logo.png flutter/assets/logo.png
           cp ../meta/patches/branding/icon.svg flutter/assets/icon.svg
-          # Replace all mipmap launcher icons with our brand PNG (resampled).
           PNG="../meta/patches/branding/logo.png"
           for dpi in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
             for size_name in "ic_launcher" "ic_launcher_round" "ic_stat_logo"; do
@@ -285,6 +280,67 @@ jobs:
           python3 ../meta/patches/branding.py
           echo "branding patches applied"
 
+      - name: Embed custom.txt as Flutter asset + register in pubspec
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+          APP_NAME: ${{ env.APP_NAME }}
+        run: |
+          set -e
+          cd rustdesk
+          SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
+          KEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
+
+          # Generate custom.txt with the SAME override-settings as Windows/macOS.
+          # Force server endpoints, hide network-settings UI, lock api-server.
+          python3 -c "
+          import json, base64
+          cfg = {
+              'app-name': '${APP_NAME}',
+              'override-settings': {
+                  'custom-rendezvous-server': '${SERVER}',
+                  'relay-server': '${SERVER}:21117',
+                  'api-server': 'https://api.azatmutq.com',
+                  'key': '${KEY}',
+                  'hide-server-settings': 'Y',
+              },
+              'default-settings': {
+                  'allow-remote-config-modification': 'Y',
+                  'enable-check-update': 'Y',
+              },
+          }
+          enc = base64.b64encode(json.dumps(cfg).encode()).decode()
+          open('flutter/assets/custom.txt', 'w').write(enc)
+          print(f'flutter/assets/custom.txt written: {len(enc)} bytes (base64)')
+          "
+          ls -la flutter/assets/custom.txt
+
+          # Register the asset in pubspec.yaml so flutter build apk includes it.
+          # Idempotent: only insert if not already present.
+          python3 -c "
+          import pathlib, re
+          p = pathlib.Path('flutter/pubspec.yaml')
+          s = p.read_text(encoding='utf-8')
+          if 'assets/custom.txt' in s:
+              print('pubspec.yaml: assets/custom.txt already registered')
+          else:
+              # Look for 'flutter:' top-level. Insert assets section under it.
+              # If 'assets:' already exists under flutter:, append our line.
+              # Otherwise add 'assets:\n    - assets/custom.txt' fresh.
+              if re.search(r'^  assets:\s*$', s, re.MULTILINE):
+                  # 'flutter:\n  assets:\n    - foo\n' style — append our line
+                  s = re.sub(r'(^  assets:\s*\n)', r'\1    - assets/custom.txt\n', s, count=1, flags=re.MULTILINE)
+                  print('pubspec.yaml: appended to existing assets section')
+              elif re.search(r'^flutter:\s*$', s, re.MULTILINE):
+                  s = re.sub(r'(^flutter:\s*\n)', r'\1  assets:\n    - assets/custom.txt\n', s, count=1, flags=re.MULTILINE)
+                  print('pubspec.yaml: created new assets section under flutter:')
+              else:
+                  print('pubspec.yaml: WARN no flutter: section found')
+              p.write_text(s, encoding='utf-8')
+          "
+          grep -A 5 "^  assets:" flutter/pubspec.yaml | head -10 || true
+
       - name: Patch Android labels + applicationId (NOT package — see env note)
         shell: bash
         run: |
@@ -294,23 +350,16 @@ jobs:
           STRINGS=flutter/android/app/src/main/res/values/strings.xml
           GRADLE=flutter/android/app/build.gradle
 
-          # User-facing label on home screen + launcher
           sed -i 's|android:label="RustDesk"|android:label="GateInDesk"|g' "$MANIFEST" || true
-          # Strings: app_name → GateInDesk
           if [ -f "$STRINGS" ]; then
             sed -i 's|<string name="app_name">RustDesk</string>|<string name="app_name">GateInDesk</string>|g' "$STRINGS"
           fi
-          # applicationId (install ID in Play Store / Settings → App info).
-          # The internal namespace `package="com.carriez.flutter_hbb"` stays —
-          # changing it would break Kotlin imports of com.carriez.flutter_hbb.R.
           sed -i 's|applicationId "com\.carriez\.flutter_hbb"|applicationId "${{ env.ANDROID_APPLICATION_ID }}"|g' "$GRADLE" || true
 
           echo "=== AndroidManifest android:label ==="
           grep "android:label" "$MANIFEST" | head -3
           echo "=== build.gradle applicationId ==="
           grep applicationId "$GRADLE" | head -3
-          echo "=== AndroidManifest package (must remain com.carriez.flutter_hbb) ==="
-          grep "package=" "$MANIFEST" | head -3
 
       - name: Install Rust toolchain (Android target)
         uses: dtolnay/rust-toolchain@v1
