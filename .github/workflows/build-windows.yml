@@ -14,7 +14,11 @@ on:
       - 'LICENSE*'
 
 env:
+  # Upstream RustDesk tag we clone from (do NOT bump unless taking newer upstream)
   RUSTDESK_REV: "1.4.6"
+  # GateInDesk own semver — bump THIS for releases. Updated on Cargo.toml,
+  # pubspec.yaml, MSI filename, Release tag, deploy URL. One source of truth.
+  GD_VERSION: "1.0.0"
   FLUTTER_VERSION: "3.24.5"
   BRIDGE_FLUTTER_VERSION: "3.22.3"
   RUST_VERSION: "1.75"
@@ -25,7 +29,7 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   APP_NAME: "GateInDesk"
   MANUFACTURER: "GateInWeb"
-  TAG_NAME: "${{ inputs.upload-tag || 'nightly' }}"
+  TAG_NAME: "${{ inputs.upload-tag || format('v{0}', env.GD_VERSION) }}"
 
   # Required repository secrets:
   #   RENDEZVOUS_SERVER  e.g. relay.example.com (no port)
@@ -175,6 +179,26 @@ jobs:
           grep -q "${SERVER}" "$F" || { echo "::error::server patch failed"; exit 1; }
           grep -q "${PUBKEY}" "$F" || { echo "::error::key patch failed"; exit 1; }
           echo "config.rs fallback patched OK"
+
+      - name: Set GateInDesk version (Cargo.toml + Flutter pubspec)
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          # 1) Cargo.toml — drives crate::VERSION (env!("CARGO_PKG_VERSION"))
+          #    used by check_software_update comparison.
+          sed -i 's|^version = "1.4.6"|version = "${{ env.GD_VERSION }}"|' Cargo.toml
+          grep -q '^version = "${{ env.GD_VERSION }}"' Cargo.toml \
+            || { echo "::error::Cargo.toml version patch failed"; exit 1; }
+          # 2) Flutter pubspec — generates FLUTTER_VERSION_* macros consumed by
+          #    flutter/windows/runner/Runner.rc (PE FileVersion/ProductVersion).
+          if grep -qE '^version: ' flutter/pubspec.yaml; then
+            sed -i 's|^version: .*|version: ${{ env.GD_VERSION }}+${{ github.run_number }}|' flutter/pubspec.yaml
+          else
+            echo "version: ${{ env.GD_VERSION }}+${{ github.run_number }}" >> flutter/pubspec.yaml
+          fi
+          echo "=== final versions ==="
+          grep '^version' Cargo.toml flutter/pubspec.yaml
 
       - name: Patch common.rs — disable custom.txt signature verification
         shell: bash
@@ -469,7 +493,7 @@ jobs:
             Get-ChildItem -Path ./Package -Recurse | Select-Object FullName | Format-Table -AutoSize
             exit 1
           }
-          $dst = "../../SignOutput/$($env:APP_NAME)-$($env:RUSTDESK_REV)-x86_64.msi"
+          $dst = "../../SignOutput/$($env:APP_NAME)-$($env:GD_VERSION)-x86_64.msi"
           Move-Item -Force $msi.FullName $dst
           Get-ChildItem ../../SignOutput/
 
@@ -493,3 +517,43 @@ jobs:
           tag_name: ${{ env.TAG_NAME }}
           prerelease: ${{ env.TAG_NAME == 'nightly' }}
           files: rustdesk/SignOutput/*
+
+      # Auto-deploy MSI to download.azatmutq.com + update version endpoint.
+      # Skipped silently if VPS_SSH_KEY secret is not configured — manual
+      # deploy step remains an option.
+      - name: Deploy MSI to VPS + bump version endpoint
+        if: env.TAG_NAME != 'nightly' && env.VPS_KEY != ''
+        env:
+          VPS_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: claude-relay@78.24.218.158
+          VPS_PORT: 22
+        shell: bash
+        run: |
+          set -e
+          # Write key to file, strict perms
+          mkdir -p ~/.ssh
+          echo "$VPS_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${VPS_PORT} -H 78.24.218.158 >> ~/.ssh/known_hosts 2>/dev/null
+
+          MSI="rustdesk/SignOutput/${APP_NAME}-${GD_VERSION}-x86_64.msi"
+          REMOTE_DIR="/opt/mirrors/gateindesk/v${GD_VERSION}"
+          REMOTE_LATEST="/opt/mirrors/gateindesk"
+
+          # 1) Upload MSI to versioned dir
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo mkdir -p $REMOTE_DIR && sudo chown claude-relay:claude-relay $REMOTE_DIR"
+          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$MSI" "$VPS_HOST:$REMOTE_DIR/"
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo chown www-data:www-data $REMOTE_DIR/*.msi && sudo chmod 644 $REMOTE_DIR/*.msi"
+
+          # 2) Update /api/version/latest endpoint via inline JSON in nginx vhost
+          NEW_JSON="{\"version\":\"${GD_VERSION}\",\"url\":\"https://github.com/snookerm/Gateindesk/releases/tag/v${GD_VERSION}\"}"
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo sed -i 's|return 200 .*|return 200 '\''${NEW_JSON}'\'';|' /etc/nginx/sites-available/api.azatmutq.com && sudo nginx -t && sudo systemctl reload nginx"
+
+          # 3) Mirror to /opt/mirrors/gateindesk/ root for backward compat
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo cp $REMOTE_DIR/*.msi $REMOTE_LATEST/${APP_NAME}-${GD_VERSION}-x86_64.msi"
+
+          # 4) Smoke-test endpoint returns new version
+          DEPLOYED=$(curl -s -X POST https://api.azatmutq.com/api/version/latest -H 'Content-Type: application/json' -d '{}')
+          echo "deployed: $DEPLOYED"
+          echo "$DEPLOYED" | grep -q "${GD_VERSION}" || { echo "::error::version not reflected"; exit 1; }
+          echo "deploy OK: v${GD_VERSION} live at download.azatmutq.com/gateindesk/v${GD_VERSION}/"
