@@ -190,7 +190,7 @@ jobs:
             exit 1
           fi
 
-      - name: Patch config.rs fallback constants
+      - name: Patch config.rs fallback constants + APP_NAME default
         shell: bash
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
@@ -203,8 +203,15 @@ jobs:
           PUBKEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
           sed -i "s|\"rs-ny.rustdesk.com\"|\"${SERVER}\"|g" "$F"
           sed -i "s|\"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\"|\"${PUBKEY}\"|g" "$F"
+          # Fallback APP_NAME — drives bind.mainGetAppNameSync() when
+          # custom.txt isn't loaded. On Android, Rust load_custom_client()
+          # looks for custom.txt at <exe_parent>/custom.txt which is
+          # /data/data/<pkg>/lib-N/ (read-only) — Dart writes elsewhere.
+          # So hardcoded fallback is the only reliable way to get correct app name.
+          sed -i 's|RwLock::new("RustDesk".to_owned())|RwLock::new("GateInDesk".to_owned())|' "$F"
           grep -q "${SERVER}" "$F" || { echo "::error::server patch failed"; exit 1; }
-          echo "config.rs patched"
+          grep -q 'RwLock::new("GateInDesk"' "$F" || { echo "::error::APP_NAME patch failed"; exit 1; }
+          echo "config.rs patched (server + key + APP_NAME)"
 
       - name: Set GateInDesk version
         shell: bash
@@ -254,7 +261,7 @@ jobs:
             fi
           done
 
-      - name: Apply branding patches (Dart URL sweep + lang + Python)
+      - name: Apply branding patches (Dart URL sweep + lang + Python + force-hide ID/Relay)
         shell: bash
         run: |
           set -e
@@ -277,6 +284,12 @@ jobs:
           sed -i 's|"Slogan_tip", "Made with heart in this chaotic world!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/en.rs
           sed -i 's|"Slogan_tip", "Сделано с душой в этом безумном мире!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/ru.rs
 
+          # Force-hide ID/Relay Server SettingsTile in mobile Settings.
+          # Prepend `false &&` to make condition always false → tile never shown.
+          # End-user can't switch server (we lock it via fallback config.rs).
+          sed -i 's|if (!disabledSettings \&\& !_hideNetwork \&\& !_hideServer)|if (false \&\& !disabledSettings \&\& !_hideNetwork \&\& !_hideServer)|' flutter/lib/mobile/pages/settings_page.dart
+          grep -q "if (false && !disabledSettings" flutter/lib/mobile/pages/settings_page.dart || { echo "::warning::ID/Relay force-hide didn't apply"; }
+
           python3 ../meta/patches/branding.py
           echo "branding patches applied"
 
@@ -291,9 +304,6 @@ jobs:
           cd rustdesk
           SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
           KEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
-
-          # Generate custom.txt with the SAME override-settings as Windows/macOS.
-          # Force server endpoints, hide network-settings UI, lock api-server.
           python3 -c "
           import json, base64
           cfg = {
@@ -315,9 +325,6 @@ jobs:
           print(f'flutter/assets/custom.txt written: {len(enc)} bytes (base64)')
           "
           ls -la flutter/assets/custom.txt
-
-          # Register the asset in pubspec.yaml so flutter build apk includes it.
-          # Idempotent: only insert if not already present.
           python3 -c "
           import pathlib, re
           p = pathlib.Path('flutter/pubspec.yaml')
@@ -325,11 +332,7 @@ jobs:
           if 'assets/custom.txt' in s:
               print('pubspec.yaml: assets/custom.txt already registered')
           else:
-              # Look for 'flutter:' top-level. Insert assets section under it.
-              # If 'assets:' already exists under flutter:, append our line.
-              # Otherwise add 'assets:\n    - assets/custom.txt' fresh.
               if re.search(r'^  assets:\s*$', s, re.MULTILINE):
-                  # 'flutter:\n  assets:\n    - foo\n' style — append our line
                   s = re.sub(r'(^  assets:\s*\n)', r'\1    - assets/custom.txt\n', s, count=1, flags=re.MULTILINE)
                   print('pubspec.yaml: appended to existing assets section')
               elif re.search(r'^flutter:\s*$', s, re.MULTILINE):
