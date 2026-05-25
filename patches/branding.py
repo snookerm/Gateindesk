@@ -66,6 +66,33 @@ def patch_user_model_oidc():
     print("user_model.dart: common-oidc/null guard added")
 
 
+def patch_remove_update_guard():
+    """Remove `if is_custom_client() { return; }` guard at the top of
+    check_software_update so OUR fork actually polls /api/version/latest.
+
+    The original guard is multi-line — sed in workflow can't match across
+    newlines reliably, so this Python patch does it.
+    """
+    f = Path("src/common.rs")
+    src = f.read_text(encoding="utf-8")
+    needle = (
+        "pub fn check_software_update() {\n"
+        "    if is_custom_client() {\n"
+        "        return;\n"
+        "    }\n"
+    )
+    if needle not in src:
+        if "pub fn check_software_update() {\n    let opt" in src:
+            print("update guard: skip (already removed)")
+        else:
+            print("update guard: skip (anchor not found — upstream changed?)")
+        return
+    replacement = "pub fn check_software_update() {\n"
+    src = src.replace(needle, replacement, 1)
+    f.write_text(src, encoding="utf-8")
+    print("update guard: is_custom_client early-return removed")
+
+
 def patch_main_window_icon():
     """Force-set window icon via window_manager using ABSOLUTE path.
 
@@ -373,6 +400,7 @@ def main():
     patch_about_dialog()
     patch_user_model_oidc()
     patch_login_register_button()
+    patch_remove_update_guard()
     patch_main_window_icon()
     patch_support_dialog()
     patch_support_link_in_sidebar()

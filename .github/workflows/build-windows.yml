@@ -240,12 +240,9 @@ jobs:
           #     hbb_common/src/lib.rs:496 has const URL = "https://api.rustdesk.com/version/latest"
           sed -i 's|https://api.rustdesk.com/version/latest|https://api.azatmutq.com/api/version/latest|' libs/hbb_common/src/lib.rs
 
-          # 1b. Auto-update: remove is_custom_client early-return guard in
-          #     check_software_update (common.rs:943-945) — RustDesk
-          #     normally disables update checks for forks, we want them on.
-          #     Replace the body of check_software_update conditional.
-          sed -i 's|if is_custom_client() { return; }|if false { return; }|' src/common.rs
-          # The above pattern in common.rs is on lines around 943; sed is line-agnostic.
+          # 1b. Auto-update: removal of `if is_custom_client() { return; }`
+          #     guard in check_software_update is done by patches/branding.py
+          #     (multi-line pattern, sed cant match across newlines reliably).
 
           # 2. Footer banner: change pricing URL to our register page,
           #    rewrite text to "Open your account"
