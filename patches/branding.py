@@ -66,6 +66,65 @@ def patch_user_model_oidc():
     print("user_model.dart: common-oidc/null guard added")
 
 
+def patch_remove_update_guard_buildhelpcards():
+    """THIRD is_custom_client guard for updates lives in
+    desktop_home_page.dart:432-457 buildHelpCards(). Two filters block
+    custom-clients from ever seeing the update card:
+
+      if (!bind.isCustomClient() &&
+          updateUrl.isNotEmpty &&
+          !isCardClosed &&
+          bind.mainUriPrefixSync().contains('rustdesk')) {
+
+    Even with Rust + checkUpdate Dart guards removed (so the call
+    fires and updateUrl gets populated), this widget refuses to render
+    the banner for our fork. Found 2026-05-25 after nginx access log
+    confirmed 3 successful POST /api/version/latest with HTTP 200 but
+    no banner shown.
+
+    Also rewrites two upstream URLs inside the card:
+      - https://rustdesk.com/download  -> https://download.azatmutq.com/gateindesk/
+      - https://github.com/rustdesk/rustdesk/releases/tag/X
+                                       -> https://github.com/snookerm/Gateindesk/releases
+    """
+    f = Path("flutter/lib/desktop/pages/desktop_home_page.dart")
+    src = f.read_text(encoding="utf-8")
+    if "GD_PATCHED_BUILDHELPCARDS" in src:
+        print("buildHelpCards guard: skip (already patched)")
+        return
+
+    # Remove the two upstream-only filters
+    old_guard = (
+        "    if (!bind.isCustomClient() &&\n"
+        "        updateUrl.isNotEmpty &&\n"
+        "        !isCardClosed &&\n"
+        "        bind.mainUriPrefixSync().contains('rustdesk')) {"
+    )
+    new_guard = (
+        "    // GD_PATCHED_BUILDHELPCARDS — removed isCustomClient + rustdesk URI checks\n"
+        "    if (updateUrl.isNotEmpty && !isCardClosed) {"
+    )
+    if old_guard not in src:
+        print("buildHelpCards guard: skip (guard anchor not found)")
+        return
+    src = src.replace(old_guard, new_guard, 1)
+
+    # Rewrite upstream URL for the Download branch (fallback when not installed)
+    src = src.replace(
+        "final Uri url = Uri.parse('https://rustdesk.com/download');",
+        "final Uri url = Uri.parse('https://download.azatmutq.com/gateindesk/');",
+    )
+
+    # Rewrite changelog link to our repo releases
+    src = src.replace(
+        "'https://github.com/rustdesk/rustdesk/releases/tag/${bind.mainGetNewVersion()}'",
+        "'https://github.com/snookerm/Gateindesk/releases'",
+    )
+
+    f.write_text(src, encoding="utf-8")
+    print("buildHelpCards guard: removed + URLs rewritten")
+
+
 def patch_remove_update_guard_dart():
     """RustDesk has TWO is_custom_client guards for update checks:
     one in Rust (common.rs check_software_update — handled by
@@ -424,6 +483,97 @@ void showGateInDeskSupportDialog(BuildContext context) {
     print("support dialog: implementation injected in common.dart")
 
 
+def patch_telegram_link_below_powered():
+    """Add 'Поддержка в Telegram' link directly under loadPowered hint.
+    Opens https://t.me/snookerm926 in external browser/app.
+    Separate from the form-based Support card — direct chat in TG.
+    """
+    f = Path("flutter/lib/desktop/pages/desktop_home_page.dart")
+    src = f.read_text(encoding="utf-8")
+    if "Поддержка в Telegram" in src:
+        print("Telegram link: skip (already injected)")
+        return
+
+    # Need url_launcher for launchUrl call
+    if "package:url_launcher/url_launcher.dart" not in src:
+        first_import = src.find("import ")
+        src = src[:first_import] + (
+            "import 'package:url_launcher/url_launcher.dart';\n"
+        ) + src[first_import:]
+
+    anchor = """      if (bind.isCustomClient())
+        Align(
+          alignment: Alignment.center,
+          child: loadPowered(context),
+        ),"""
+    if anchor not in src:
+        print("Telegram link: skip (loadPowered anchor not found)")
+        return
+
+    inject = anchor + """
+      // Direct support chat in Telegram (different from the form-based
+      // Support card below — instant chat for quick questions).
+      if (bind.isCustomClient())
+        Align(
+          alignment: Alignment.center,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 2, bottom: 4),
+            child: InkWell(
+              onTap: () => launchUrl(
+                Uri.parse('https://t.me/snookerm926'),
+                mode: LaunchMode.externalApplication,
+              ),
+              child: Text(
+                'Поддержка в Telegram',
+                style: TextStyle(
+                  fontSize: 11,
+                  decoration: TextDecoration.underline,
+                  color: Color(0xFF0071FF),
+                ),
+              ),
+            ),
+          ),
+        ),"""
+
+    src = src.replace(anchor, inject)
+    f.write_text(src, encoding="utf-8")
+    print("Telegram link: injected under loadPowered")
+
+
+def patch_support_link_in_about():
+    """Restore 'Служба поддержки' link inside the About dialog.
+    Was removed during the sidebar prominent-card refactor — user
+    wants both: prominent card in sidebar AND link in About + TG.
+    """
+    f = Path("flutter/lib/desktop/pages/desktop_setting_page.dart")
+    src = f.read_text(encoding="utf-8")
+    if "showGateInDeskSupportDialog" in src:
+        print("About Support link: skip (already present)")
+        return
+
+    # Anchor: Website InkWell (after our 'Личный кабинет' insert by patch_about_dialog).
+    anchor = """InkWell(
+                  onTap: () {
+                    launchUrlString('https://gateindesk.azatmutq.com');
+                  },
+                  child: Text(
+                    translate('Website'),"""
+    if anchor not in src:
+        print("About Support link: skip (Website anchor not found)")
+        return
+
+    support_link = """InkWell(
+                  onTap: () => showGateInDeskSupportDialog(context),
+                  child: Text(
+                    'Служба поддержки',
+                    style: linkStyle,
+                  ).marginSymmetric(vertical: 4.0)),
+              """ + anchor
+    src = src.replace(anchor, support_link)
+    f.write_text(src, encoding="utf-8")
+    print("About Support link: restored before Website")
+
+
 def patch_support_link_in_sidebar():
     """Insert a prominent 'Служба поддержки' button card in the desktop
     home left pane, right after the built-in buildHelpCards (which renders
@@ -527,9 +677,12 @@ def main():
     patch_login_register_button()
     patch_remove_update_guard()
     patch_remove_update_guard_dart()
+    patch_remove_update_guard_buildhelpcards()
     patch_main_window_icon()
     patch_support_dialog()
+    patch_telegram_link_below_powered()
     patch_support_link_in_sidebar()
+    patch_support_link_in_about()
     print("=== branding patches done ===")
 
 
