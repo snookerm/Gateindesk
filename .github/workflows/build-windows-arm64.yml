@@ -1,0 +1,443 @@
+name: Build Windows ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload-tag:
+        description: 'Release tag (optional)'
+        type: string
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-windows-arm64.yml'
+      - 'patches/branding.py'
+      - 'patches/branding/**'
+
+env:
+  RUSTDESK_REV: "1.4.6"
+  GD_VERSION: "1.0.7"
+  FLUTTER_VERSION: "3.24.5"
+  BRIDGE_FLUTTER_VERSION: "3.22.3"
+  RUST_VERSION: "1.75"
+  LLVM_VERSION: "15.0.6"
+  CARGO_EXPAND_VERSION: "1.0.95"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  APP_NAME: "GateInDesk"
+  MANUFACTURER: "GateInWeb"
+  TAG_NAME: "${{ inputs.upload-tag || '' }}"
+
+jobs:
+  generate-bridge:
+    name: Generate flutter-rust-bridge
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Clone upstream rustdesk + submodules
+        shell: bash
+        run: |
+          git clone --depth=1 --branch=${RUSTDESK_REV} https://github.com/rustdesk/rustdesk.git rustdesk
+          cd rustdesk
+          git submodule update --init --recursive --depth=1
+      - name: Install Linux prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang cmake curl gcc git g++ libclang-dev libgtk-3-dev llvm-dev nasm ninja-build pkg-config wget
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: bridge-ubuntu-22.04
+          workspaces: rustdesk
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.BRIDGE_FLUTTER_VERSION }}
+          cache: true
+      - name: Install flutter_rust_bridge_codegen
+        shell: bash
+        run: |
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
+          cd rustdesk/flutter
+          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' pubspec.yaml
+          flutter pub get
+      - name: Run flutter-rust-bridge codegen
+        shell: bash
+        run: |
+          cd rustdesk
+          ~/.cargo/bin/flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+      - name: Upload bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-artifact
+          path: |
+            rustdesk/src/bridge_generated.rs
+            rustdesk/src/bridge_generated.io.rs
+            rustdesk/flutter/lib/generated_bridge.dart
+            rustdesk/flutter/lib/generated_bridge.freezed.dart
+            rustdesk/flutter/macos/Runner/bridge_generated.h
+            rustdesk/flutter/ios/Runner/bridge_generated.h
+          retention-days: 1
+
+  build-windows-arm64:
+    name: GateInDesk Windows ARM64 (MSI + Portable QS, cross-compile)
+    needs: generate-bridge
+    runs-on: windows-2022
+    timeout-minutes: 150
+    permissions:
+      contents: write
+
+    steps:
+      - name: Validate required secrets
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+          BRANDING_URL: ${{ secrets.BRANDING_URL }}
+        run: |
+          missing=0
+          [ -z "$RENDEZVOUS_SERVER" ] && { echo "::error::RENDEZVOUS_SERVER not set"; missing=1; }
+          [ -z "$RS_PUB_KEY" ] && { echo "::error::RS_PUB_KEY not set"; missing=1; }
+          [ -z "$BRANDING_URL" ] && { echo "::error::BRANDING_URL not set"; missing=1; }
+          [ "$missing" = "1" ] && exit 1
+          echo "all secrets present"
+
+      - name: Checkout meta-repo
+        uses: actions/checkout@v4
+        with:
+          path: meta
+
+      - name: Export Actions cache env
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Clone upstream rustdesk + submodules
+        shell: bash
+        run: |
+          git clone --depth=1 --branch=${RUSTDESK_REV} https://github.com/rustdesk/rustdesk.git rustdesk
+          cd rustdesk
+          git submodule update --init --recursive --depth=1
+
+      - name: Restore flutter-rust-bridge artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: rustdesk/
+
+      - name: Patch config.rs fallback constants
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          set -e
+          cd rustdesk
+          F=libs/hbb_common/src/config.rs
+          SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
+          PUBKEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
+          sed -i "s|\"rs-ny.rustdesk.com\"|\"${SERVER}\"|g" "$F"
+          sed -i "s|\"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\"|\"${PUBKEY}\"|g" "$F"
+          grep -q "${SERVER}" "$F" || { echo "::error::server patch failed"; exit 1; }
+          echo "config.rs fallback patched"
+
+      - name: Set GateInDesk version
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          sed -i 's|^version = "1.4.6"|version = "${{ env.GD_VERSION }}"|' Cargo.toml
+          if grep -qE '^version: ' flutter/pubspec.yaml; then
+            sed -i 's|^version: .*|version: ${{ env.GD_VERSION }}+${{ github.run_number }}|' flutter/pubspec.yaml
+          else
+            echo "version: ${{ env.GD_VERSION }}+${{ github.run_number }}" >> flutter/pubspec.yaml
+          fi
+
+      - name: Patch common.rs (disable signature verification)
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          F=src/common.rs
+          sed -i 's|let Ok(data) = sign::verify(&data, \&pk) else {|let _ = pk; let data = data; if false {|' "$F"
+          grep -q "if false {" "$F" || { echo "::error::common.rs patch failed"; exit 1; }
+
+      - name: Install GateInDesk branding
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          cp ../meta/patches/branding/logo.png flutter/assets/logo.png
+          cp ../meta/patches/branding/icon.ico res/icon.ico
+          cp ../meta/patches/branding/icon.ico res/tray-icon.ico
+          cp ../meta/patches/branding/icon.ico flutter/windows/runner/resources/app_icon.ico
+          cp ../meta/patches/branding/icon.ico flutter/assets/icon.ico
+          cp ../meta/patches/branding/icon.svg flutter/assets/icon.svg
+
+      - name: Apply branding patches (text + URL rewrites + Python)
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+
+          sed -i 's|"powered_by_me", "Powered by RustDesk"|"powered_by_me", "Powered by GateInDesk"|' src/lang/en.rs
+          sed -i 's|"powered_by_me", "Основано на RustDesk"|"powered_by_me", "Работает на GateInDesk"|' src/lang/ru.rs
+          sed -i 's|https://api.rustdesk.com/version/latest|https://api.azatmutq.com/api/version/latest|' libs/hbb_common/src/lib.rs
+          sed -i 's|"setup_server_tip", "For faster connection, please set up your own server"|"setup_server_tip", "Open your personal account"|' src/lang/en.rs
+          sed -i 's|"setup_server_tip", "Для более быстрого подключения настройте собственный сервер."|"setup_server_tip", "Откройте личный кабинет"|' src/lang/ru.rs
+
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/privacy.html|https://gateindesk.azatmutq.com/privacy.html|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/download|https://download.azatmutq.com/gateindesk/|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/pricing|https://gateindesk.azatmutq.com/_admin/#/register|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|'https://rustdesk.com'|'https://gateindesk.azatmutq.com'|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|'https://rustdesk.com/'|'https://gateindesk.azatmutq.com/'|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i 's|"https://rustdesk.com"|"https://gateindesk.azatmutq.com"|g' {} +
+
+          sed -i 's|Purslane Ltd|GateInWeb|g' flutter/lib/desktop/pages/desktop_setting_page.dart
+          sed -i 's|"Slogan_tip", "Made with heart in this chaotic world!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/en.rs
+          sed -i 's|"Slogan_tip", "Сделано с душой в этом безумном мире!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/ru.rs
+          sed -i 's|RustDesk can not work properly|GateInDesk can not work properly|' src/lang/en.rs
+          sed -i 's|click the button below to install RustDesk|click the button below to install GateInDesk|' src/lang/en.rs
+          sed -i 's|RustDesk может работать неправильно|GateInDesk может работать неправильно|' src/lang/ru.rs
+          sed -i 's|для установки RustDesk в системе|для установки GateInDesk в системе|' src/lang/ru.rs
+
+          python3 ../meta/patches/branding.py
+          echo "branding patches applied"
+
+      - name: Install LLVM
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install Flutter (stock — rustdesk/engine has only x64, not ARM64)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Install Rust toolchain (ARM64 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-pc-windows-msvc
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: windows-gateindesk-arm64
+          workspaces: rustdesk
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install vcpkg dependencies (arm64-windows-static)
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          n=0; max=3
+          until "$VCPKG_ROOT/vcpkg" install --triplet arm64-windows-static --x-install-root="$VCPKG_ROOT/installed"; do
+            n=$((n+1))
+            if [ $n -ge $max ]; then
+              echo "::error::vcpkg arm64 install failed after $max attempts"
+              find "$VCPKG_ROOT/" -name "*.log" | head -5 | while read -r f; do
+                echo "=== $f ==="; cat "$f"
+              done
+              exit 1
+            fi
+            echo "::warning::attempt $n failed, retrying in $((n*60))s"
+            sleep $((n*60))
+          done
+
+      - name: Build RustDesk ARM64 binary (build.py)
+        shell: pwsh
+        env:
+          # Force Rust to use ARM64 target. build.py inherits cargo default target.
+          CARGO_BUILD_TARGET: aarch64-pc-windows-msvc
+        run: |
+          cd rustdesk
+          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          Move-Item -Force ./flutter/build/windows/arm64/runner/Release ./gateindesk
+          if (Test-Path ./gateindesk/rustdesk.exe) {
+            Move-Item -Force ./gateindesk/rustdesk.exe "./gateindesk/${env:APP_NAME}.exe"
+          }
+          Get-ChildItem ./gateindesk/*.exe | Select-Object Name,Length
+
+      - name: Generate custom.txt
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+          APP_NAME: ${{ env.APP_NAME }}
+        run: |
+          set -e
+          cd rustdesk
+          SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
+          KEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
+          python3 -c "
+          import json, base64
+          cfg = {
+              'app-name': '${APP_NAME}',
+              'override-settings': {
+                  'custom-rendezvous-server': '${SERVER}',
+                  'relay-server': '${SERVER}:21117',
+                  'api-server': 'https://api.azatmutq.com',
+                  'key': '${KEY}',
+                  'hide-server-settings': 'Y',
+              },
+              'default-settings': {
+                  'allow-remote-config-modification': 'Y',
+                  'enable-check-update': 'Y',
+              },
+          }
+          enc = base64.b64encode(json.dumps(cfg).encode()).decode()
+          open('./gateindesk/custom.txt', 'w').write(enc)
+          print(f'custom.txt: {len(enc)} bytes')
+          "
+          ls -la ./gateindesk/custom.txt
+
+      - name: Build Portable Quick Support .exe (ARM64)
+        shell: pwsh
+        env:
+          APP_NAME: ${{ env.APP_NAME }}
+          CARGO_BUILD_TARGET: aarch64-pc-windows-msvc
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location rustdesk
+
+          Copy-Item -Recurse -Force ./gateindesk ./gateindesk-portable
+
+          $portableMain = "libs/portable/src/main.rs"
+          (Get-Content -Raw $portableMain) `
+            -replace 'const APP_PREFIX: &str = "rustdesk";', 'const APP_PREFIX: &str = "gateindesk";' `
+            | Set-Content -NoNewline $portableMain
+
+          Push-Location libs/portable
+          pip install -r requirements.txt
+          python3 .\generate.py -f ../../gateindesk-portable -o . -e "./$($env:APP_NAME).exe"
+          cargo build --release --target aarch64-pc-windows-msvc
+          Pop-Location
+
+          New-Item -ItemType Directory -Force -Path ./SignOutput | Out-Null
+          $packerExe = "./target/aarch64-pc-windows-msvc/release/rustdesk-portable-packer.exe"
+          if (-not (Test-Path $packerExe)) {
+            Write-Host "::error::portable packer not built — $packerExe missing"
+            exit 1
+          }
+          $portableOut = "./SignOutput/$($env:APP_NAME)-QS-$($env:GD_VERSION)-aarch64.exe"
+          Move-Item -Force $packerExe $portableOut
+          Get-Item $portableOut | Select-Object Name,Length
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+        with:
+          nuget-version: 'latest'
+
+      - name: Build MSI installer (ARM64)
+        shell: pwsh
+        env:
+          APP_NAME: ${{ env.APP_NAME }}
+          MANUFACTURER: ${{ env.MANUFACTURER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location rustdesk/res/msi
+
+          if (Test-Path requirements.txt) {
+            pip3 install -r requirements.txt
+          }
+
+          python preprocess.py `
+            --arp `
+            --app-name "$env:APP_NAME" `
+            --manufacturer "$env:MANUFACTURER" `
+            -v "$env:RUSTDESK_REV" `
+            --custom `
+            -d ../../gateindesk
+
+          nuget restore msi.sln
+
+          msbuild msi.sln `
+            -p:Configuration=Release `
+            -p:Platform=ARM64 `
+            /p:TargetVersion=Windows10
+
+          New-Item -ItemType Directory -Force -Path ../../SignOutput | Out-Null
+          $msi = Get-ChildItem -Path ./Package -Recurse -Filter "*.msi" | Select-Object -First 1
+          if ($null -eq $msi) {
+            Write-Host "::error::MSI not found"
+            Get-ChildItem -Path ./Package -Recurse | Select-Object FullName | Format-Table -AutoSize
+            exit 1
+          }
+          $dst = "../../SignOutput/$($env:APP_NAME)-$($env:GD_VERSION)-aarch64.msi"
+          Move-Item -Force $msi.FullName $dst
+          Get-ChildItem ../../SignOutput/
+
+      - name: Compute SHA256
+        shell: bash
+        run: |
+          cd rustdesk/SignOutput
+          sha256sum *.msi *.exe > SHA256SUMS-arm64
+          cat SHA256SUMS-arm64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateindesk-windows-aarch64
+          path: rustdesk/SignOutput/
+          retention-days: 30
+
+      - name: Publish to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.upload-tag || env.GD_VERSION }}
+          prerelease: false
+          files: rustdesk/SignOutput/*
+
+      - name: Deploy to VPS
+        if: env.VPS_KEY != ''
+        env:
+          VPS_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: claude-relay@78.24.218.158
+          VPS_PORT: 22
+        shell: bash
+        run: |
+          set -e
+          mkdir -p ~/.ssh
+          echo "$VPS_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${VPS_PORT} -H 78.24.218.158 >> ~/.ssh/known_hosts 2>/dev/null
+
+          MSI="rustdesk/SignOutput/${APP_NAME}-${GD_VERSION}-aarch64.msi"
+          QS_EXE="rustdesk/SignOutput/${APP_NAME}-QS-${GD_VERSION}-aarch64.exe"
+          INSTALLER_DIR="/opt/mirrors/gateindesk/v${GD_VERSION}"
+          PORTABLE_DIR="/opt/mirrors/gateindesk/portable/v${GD_VERSION}"
+
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo mkdir -p $INSTALLER_DIR $PORTABLE_DIR && sudo chown -R claude-relay:claude-relay /opt/mirrors/gateindesk/v${GD_VERSION} /opt/mirrors/gateindesk/portable"
+          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$MSI"    "$VPS_HOST:$INSTALLER_DIR/"
+          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$QS_EXE" "$VPS_HOST:$PORTABLE_DIR/"
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST \
+            "sudo chown www-data:www-data $INSTALLER_DIR/*.msi $PORTABLE_DIR/*.exe && \
+             sudo chmod 644 $INSTALLER_DIR/*.msi $PORTABLE_DIR/*.exe"
+          echo "deploy OK: ARM64 MSI + Portable QS at download.azatmutq.com/gateindesk/v${GD_VERSION}/"
