@@ -18,7 +18,7 @@ env:
   RUSTDESK_REV: "1.4.6"
   # GateInDesk own semver — bump THIS for releases. Updated on Cargo.toml,
   # pubspec.yaml, MSI filename, Release tag, deploy URL. One source of truth.
-  GD_VERSION: "1.0.6"
+  GD_VERSION: "1.0.7"
   FLUTTER_VERSION: "3.24.5"
   BRIDGE_FLUTTER_VERSION: "3.22.3"
   RUST_VERSION: "1.75"
@@ -223,30 +223,58 @@ jobs:
           set -e
           cd rustdesk
 
+          # 1. "Powered by RustDesk" hint top-left
           sed -i 's|"powered_by_me", "Powered by RustDesk"|"powered_by_me", "Powered by GateInDesk"|' src/lang/en.rs
           sed -i 's|"powered_by_me", "Основано на RustDesk"|"powered_by_me", "Работает на GateInDesk"|' src/lang/ru.rs
 
+          # 1a. Auto-update version-check URL (Rust-side, in hbb_common).
           sed -i 's|https://api.rustdesk.com/version/latest|https://api.azatmutq.com/api/version/latest|' libs/hbb_common/src/lib.rs
 
-          sed -i 's|const url = "https://rustdesk.com/pricing"|const url = "https://gateindesk.azatmutq.com/_admin/#/register"|' flutter/lib/desktop/pages/connection_page.dart
+          # 2. Footer banner text (URL itself is also handled by the global sweep below).
           sed -i 's|"setup_server_tip", "For faster connection, please set up your own server"|"setup_server_tip", "Open your personal account"|' src/lang/en.rs
           sed -i 's|"setup_server_tip", "Для более быстрого подключения настройте собственный сервер."|"setup_server_tip", "Откройте личный кабинет"|' src/lang/ru.rs
 
-          sed -i "s|launchUrlString('https://rustdesk.com/privacy.html')|launchUrlString('https://gateindesk.azatmutq.com/privacy.html')|" flutter/lib/desktop/pages/desktop_setting_page.dart
-          sed -i "s|launchUrlString('https://rustdesk.com')|launchUrlString('https://gateindesk.azatmutq.com')|" flutter/lib/desktop/pages/desktop_setting_page.dart
+          # 3. GLOBAL Dart URL sweep — replace ALL rustdesk.com user-facing URLs
+          #    across the entire Flutter codebase. Was per-file before and missed
+          #    install_page.dart (EULA link), mobile/settings_page.dart, Tooltip
+          #    message strings. Keep /docs/* untouched (no docs site yet).
+          find flutter/lib -name '*.dart' -exec sed -i \
+            "s|https://rustdesk.com/privacy.html|https://gateindesk.azatmutq.com/privacy.html|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i \
+            "s|https://rustdesk.com/download|https://download.azatmutq.com/gateindesk/|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i \
+            "s|https://rustdesk.com/pricing|https://gateindesk.azatmutq.com/_admin/#/register|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i \
+            "s|'https://rustdesk.com'|'https://gateindesk.azatmutq.com'|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i \
+            "s|'https://rustdesk.com/'|'https://gateindesk.azatmutq.com/'|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i \
+            's|"https://rustdesk.com"|"https://gateindesk.azatmutq.com"|g' {} +
 
-          sed -i "s|launchUrl(Uri.parse('https://rustdesk.com'))|launchUrl(Uri.parse('https://gateindesk.azatmutq.com'))|" flutter/lib/common.dart
+          # Sanity check — any remaining non-docs/non-comment rustdesk.com is a regression.
+          LEFT=$(grep -rE "rustdesk\.com[^/]" flutter/lib --include='*.dart' \
+            | grep -v "/docs/" | grep -v "^\s*//" | wc -l)
+          echo "remaining non-docs/non-comment rustdesk.com refs in Dart: $LEFT"
+          if [ "$LEFT" -gt 0 ]; then
+            echo "::warning::unhandled rustdesk.com URLs (review):"
+            grep -rE "rustdesk\.com[^/]" flutter/lib --include='*.dart' | grep -v "/docs/" | grep -v "^\s*//"
+          fi
 
+          # 4. Copyright Purslane Ltd -> GateInWeb
           sed -i 's|Purslane Ltd|GateInWeb|g' flutter/lib/desktop/pages/desktop_setting_page.dart
 
+          # 5. Slogan_tip -> our slogan
           sed -i 's|"Slogan_tip", "Made with heart in this chaotic world!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/en.rs
           sed -i 's|"Slogan_tip", "Сделано с душой в этом безумном мире!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/ru.rs
 
+          # 6. install_tip UAC text — replace RustDesk -> GateInDesk
           sed -i 's|RustDesk can not work properly|GateInDesk can not work properly|' src/lang/en.rs
           sed -i 's|click the button below to install RustDesk|click the button below to install GateInDesk|' src/lang/en.rs
           sed -i 's|RustDesk может работать неправильно|GateInDesk может работать неправильно|' src/lang/ru.rs
           sed -i 's|для установки RustDesk в системе|для установки GateInDesk в системе|' src/lang/ru.rs
 
+          # 7. Multi-line inserts (About link / register button / oidc guard)
+          #    are in a separate Python script to avoid heredoc-in-YAML escaping.
           python3 ../meta/patches/branding.py
 
           echo "all branding patches applied"
