@@ -18,7 +18,7 @@ env:
   RUSTDESK_REV: "1.4.6"
   # GateInDesk own semver — bump THIS for releases. Updated on Cargo.toml,
   # pubspec.yaml, MSI filename, Release tag, deploy URL. One source of truth.
-  GD_VERSION: "1.0.1"
+  GD_VERSION: "1.0.2"
   FLUTTER_VERSION: "3.24.5"
   BRIDGE_FLUTTER_VERSION: "3.22.3"
   RUST_VERSION: "1.75"
@@ -518,7 +518,10 @@ jobs:
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.upload-tag || format('v{0}', env.GD_VERSION) }}
+          # No 'v' prefix — Rust get_version_number parses "v1.0.2" as 10
+          # (split-by-dot yields "v1" which fails int parse). See incident
+          # 2026-05-25 docs in mikrotiks/RustDesk/BUILD_LESSONS.md.
+          tag_name: ${{ inputs.upload-tag || env.GD_VERSION }}
           prerelease: false
           files: rustdesk/SignOutput/*
 
@@ -550,7 +553,9 @@ jobs:
           ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo chown www-data:www-data $REMOTE_DIR/*.msi && sudo chmod 644 $REMOTE_DIR/*.msi"
 
           # 2) Update /api/version/latest endpoint via inline JSON in nginx vhost
-          NEW_JSON="{\"version\":\"${GD_VERSION}\",\"url\":\"https://github.com/snookerm/Gateindesk/releases/tag/v${GD_VERSION}\"}"
+          # URL last segment MUST be a parseable semver string for the client
+          # version comparator — NO 'v' prefix (otherwise "v1.0.2" parses as 10).
+          NEW_JSON="{\"version\":\"${GD_VERSION}\",\"url\":\"https://github.com/snookerm/Gateindesk/releases/tag/${GD_VERSION}\"}"
           ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo sed -i 's|return 200 .*|return 200 '\''${NEW_JSON}'\'';|' /etc/nginx/sites-available/api.azatmutq.com && sudo nginx -t && sudo systemctl reload nginx"
 
           # 3) Mirror to /opt/mirrors/gateindesk/ root for backward compat

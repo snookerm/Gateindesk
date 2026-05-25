@@ -66,6 +66,70 @@ def patch_user_model_oidc():
     print("user_model.dart: common-oidc/null guard added")
 
 
+def patch_download_filename():
+    """flutter_ffi.rs main_get_common handler for 'download-file-{version}' is
+    hardcoded to return 'rustdesk-{v}-x86_64.{msi|exe}'. We must:
+      1. swap 'rustdesk-' -> our app-name (so URL = GateInDesk-1.0.1-x86_64.msi)
+      2. always return .msi for custom-client when MSI is installed (upstream
+         logic returns .exe for is_custom_client=true, but we DO ship MSI)
+    Fix: replace the entire match arm block with simpler 2-arm logic that
+    uses our app-name and prefers MSI.
+    """
+    f = Path("src/flutter_ffi.rs")
+    src = f.read_text(encoding="utf-8")
+    if "GD_PATCHED_DOWNLOAD_FILE" in src:
+        print("download-file: skip (already patched)")
+        return
+
+    old = (
+        "            #[cfg(target_os = \"windows\")]\n"
+        "            return match (\n"
+        "                crate::platform::windows::is_msi_installed(),\n"
+        "                crate::common::is_custom_client(),\n"
+        "            ) {\n"
+        "                (Ok(true), false) => format!(\"rustdesk-{_version}-x86_64.msi\"),\n"
+        "                (Ok(true), true) | (Ok(false), _) => format!(\"rustdesk-{_version}-x86_64.exe\"),\n"
+        "                (Err(e), _) => {\n"
+        "                    log::error!(\"Failed to check if is msi: {}\", e);\n"
+        "                    format!(\"error:update-failed-check-msi-tip\")\n"
+        "                }\n"
+        "            };\n"
+    )
+    new = (
+        "            // GD_PATCHED_DOWNLOAD_FILE — use our app-name, always .msi when installed.\n"
+        "            #[cfg(target_os = \"windows\")]\n"
+        "            return match crate::platform::windows::is_msi_installed() {\n"
+        "                Ok(true) => format!(\"{}-{}-x86_64.msi\", crate::get_app_name(), _version),\n"
+        "                Ok(false) => format!(\"{}-{}-x86_64.exe\", crate::get_app_name(), _version),\n"
+        "                Err(e) => {\n"
+        "                    log::error!(\"Failed to check if is msi: {}\", e);\n"
+        "                    format!(\"error:update-failed-check-msi-tip\")\n"
+        "                }\n"
+        "            };\n"
+    )
+
+    if old not in src:
+        print("download-file: skip (anchor not found — upstream changed?)")
+        return
+    src = src.replace(old, new, 1)
+
+    # Same fix for macOS — original wraps the string in format!(...), so we
+    # only replace the literal STRING inside, keeping the outer format! intact.
+    # But format!("literal") has no interpolation, while we need {} + args.
+    # Easier: replace the whole format!(...) call instead.
+    src = src.replace(
+        'format!("rustdesk-{_version}-x86_64.dmg")',
+        'format!("{}-{}-x86_64.dmg", crate::get_app_name(), _version)',
+    )
+    src = src.replace(
+        'format!("rustdesk-{_version}-aarch64.dmg")',
+        'format!("{}-{}-aarch64.dmg", crate::get_app_name(), _version)',
+    )
+
+    f.write_text(src, encoding="utf-8")
+    print("download-file: app-name + .msi always for custom client")
+
+
 def patch_remove_update_guard_buildhelpcards():
     """THIRD is_custom_client guard for updates lives in
     desktop_home_page.dart:432-457 buildHelpCards(). Two filters block
@@ -781,6 +845,7 @@ def main():
     patch_remove_update_guard()
     patch_remove_update_guard_dart()
     patch_remove_update_guard_buildhelpcards()
+    patch_download_filename()
     patch_main_window_icon()
     patch_support_dialog()
     patch_telegram_link_below_powered()
