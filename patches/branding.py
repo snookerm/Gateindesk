@@ -212,18 +212,6 @@ def patch_remove_update_guard_dart():
             print("update guard (Dart): skip (anchor not found)")
         return
     # Replace: drop the inner `if (!bind.isCustomClient()) {` and its closing brace.
-    # Original:
-    #   if (!isWeb) {
-    #     if (!bind.isCustomClient()) {
-    #       platformFFI.registerEventHandler(...);
-    #       Timer(...);
-    #     }
-    #   }
-    # Patched:
-    #   if (!isWeb) {
-    #     platformFFI.registerEventHandler(...);
-    #     Timer(...);
-    #   }
     old_block = (
         "void checkUpdate() {\n"
         "  if (!isWeb) {\n"
@@ -294,22 +282,10 @@ def patch_remove_update_guard():
 
 
 def patch_main_window_icon():
-    """Force-set window icon via window_manager using ABSOLUTE path.
-
-    window_manager.cpp SetIcon uses LoadImage(NULL, path, ..., LR_LOADFROMFILE)
-    which resolves relative paths against the process CWD, not the exe dir.
-    When started from Start Menu / desktop shortcut on Windows, CWD is often
-    C:\\Windows\\System32 -> relative 'assets/icon.ico' fails -> LoadImage
-    returns NULL -> SetIcon sends NULL handle -> Windows shows default icon.
-    Some shortcuts set 'Start In' correctly, hence works on one machine and
-    not on another (incident 2026-05-24).
-
-    Fix: build absolute path from Platform.resolvedExecutable.
-    """
+    """Force-set window icon via window_manager using ABSOLUTE path."""
     f = Path("flutter/lib/main.dart")
     src = f.read_text(encoding="utf-8")
 
-    # Idempotency: drop any earlier (broken) relative setIcon line
     bad = "windowManager.setIcon('assets/icon.ico');\n    "
     if bad in src:
         src = src.replace(bad, "")
@@ -346,14 +322,11 @@ def patch_main_window_icon():
         "}\n"
     )
 
-    # Append helper at end of file (top-level function)
     if not src.rstrip().endswith("}"):
         src = src + "\n"
     src = src + helper
 
-    # Ensure dart:io is imported
     if "import 'dart:io'" not in src:
-        # Insert after first import line
         import_line = "import 'dart:io';\n"
         first_import = src.find("import ")
         if first_import != -1:
@@ -371,8 +344,6 @@ def patch_login_register_button():
         print("login.dart: skip (already has register button)")
         return
 
-    # Anchor: the FittedBox row that wraps the Login ElevatedButton.
-    # We append a Register TextButton after its closing brackets.
     old = """            FittedBox(
                 child:
                     Row(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -398,8 +369,6 @@ def patch_login_register_button():
         print("login.dart: skip (Login button anchor not found)")
         return
 
-    # login.dart imports only `package:url_launcher/url_launcher.dart`
-    # (NOT url_launcher_string). Use launchUrl(Uri.parse(...)) — same as line 175.
     new = old + """
             const SizedBox(height: 8.0),
             TextButton(
@@ -416,26 +385,19 @@ def patch_login_register_button():
 
 def patch_support_dialog():
     """Inject the support dialog implementation into common.dart so it can
-    be invoked from anywhere (sidebar, About, etc).
-
-    Sidebar link is added separately by patch_support_link_in_sidebar.
-    No link in About — user wants it under update banner in sidebar.
-    """
+    be invoked from anywhere (sidebar, About, etc)."""
     f = Path("flutter/lib/common.dart")
     src = f.read_text(encoding="utf-8")
     if "showGateInDeskSupportDialog" in src:
         print("support dialog: skip (already injected in common.dart)")
         return
 
-    # Ensure http_service import is present (already used elsewhere via 'http')
     if "as gd_http;" not in src:
         first_import = src.find("import ")
         src = src[:first_import] + (
             "import 'utils/http_service.dart' as gd_http;\n"
         ) + src[first_import:]
 
-    # Ensure dart:io and url_launcher are imported (for File/Platform/launchUrl).
-    # common.dart already imports url_launcher but check; dart:io may or may not be.
     if "import 'dart:io'" not in src:
         first_import = src.find("import ")
         src = src[:first_import] + "import 'dart:io';\n" + src[first_import:]
@@ -451,14 +413,8 @@ def patch_support_dialog():
 // Optional attached logs (text concat, base64) up to ~3 MB.
 // ────────────────────────────────────────────────────────────────────
 
-// Collect last N rotated GateInDesk_r*.log files from %APPDATA%/GateInDesk/log
-// (or platform-equivalent), concat with file headers, cap total size to 3 MB.
-// Returns null if nothing found or error.
 String? _collectGateInDeskLogs() {
   try {
-    // Use String.fromEnvironment-style lookups via Platform.environment.
-    // No Dart $-interpolation here — build path via simple concat to avoid
-    // any escaping pitfalls when this code goes through patches/branding.py.
     String? appData = Platform.environment['APPDATA'];
     appData ??= Platform.environment['HOME'];
     if (appData == null || appData.isEmpty) return null;
@@ -472,7 +428,6 @@ String? _collectGateInDeskLogs() {
       return null;
     }
 
-    // Pick last 5 log files by modification time (newest first).
     final files = logDir
         .listSync()
         .whereType<File>()
@@ -484,7 +439,7 @@ String? _collectGateInDeskLogs() {
     if (picked.isEmpty) return null;
 
     final buf = StringBuffer();
-    const int maxBytes = 3 * 1024 * 1024;  // 3 MB cap before base64
+    const int maxBytes = 3 * 1024 * 1024;
     for (final f in picked) {
       if (buf.length >= maxBytes) break;
       try {
@@ -501,7 +456,6 @@ String? _collectGateInDeskLogs() {
         }
         buf.writeln('');
       } catch (_) {
-        // skip unreadable
       }
     }
     final result = buf.toString();
@@ -519,7 +473,7 @@ void showGateInDeskSupportDialog(BuildContext context) {
   final phoneCtl   = TextEditingController();
   final messageCtl = TextEditingController();
   bool sending = false;
-  bool attachLogs = true;  // default on — diagnostic value usually wanted
+  bool attachLogs = true;
   String? status;
   bool isError = false;
 
@@ -596,7 +550,6 @@ void showGateInDeskSupportDialog(BuildContext context) {
             minLines: 3,
           ),
           const SizedBox(height: 8),
-          // Attach-logs checkbox (default ON)
           InkWell(
             onTap: () => setState(() => attachLogs = !attachLogs),
             child: Padding(
@@ -617,7 +570,6 @@ void showGateInDeskSupportDialog(BuildContext context) {
               ),
             ),
           ),
-          // Visit-our-site link
           Align(
             alignment: Alignment.centerLeft,
             child: TextButton.icon(
@@ -664,17 +616,13 @@ void showGateInDeskSupportDialog(BuildContext context) {
 
 
 def patch_telegram_link_below_powered():
-    """Add 'Поддержка в Telegram' link directly under loadPowered hint.
-    Opens https://t.me/snookerm926 in external browser/app.
-    Separate from the form-based Support card — direct chat in TG.
-    """
+    """Add 'Поддержка в Telegram' link directly under loadPowered hint."""
     f = Path("flutter/lib/desktop/pages/desktop_home_page.dart")
     src = f.read_text(encoding="utf-8")
     if "Поддержка в Telegram" in src:
         print("Telegram link: skip (already injected)")
         return
 
-    # Need url_launcher for launchUrl call
     if "package:url_launcher/url_launcher.dart" not in src:
         first_import = src.find("import ")
         src = src[:first_import] + (
@@ -691,8 +639,6 @@ def patch_telegram_link_below_powered():
         return
 
     inject = anchor + """
-      // Direct support chat in Telegram (different from the form-based
-      // Support card below — instant chat for quick questions).
       if (bind.isCustomClient())
         Align(
           alignment: Alignment.center,
@@ -721,17 +667,13 @@ def patch_telegram_link_below_powered():
 
 
 def patch_support_link_in_about():
-    """Restore 'Служба поддержки' link inside the About dialog.
-    Was removed during the sidebar prominent-card refactor — user
-    wants both: prominent card in sidebar AND link in About + TG.
-    """
+    """Restore 'Служба поддержки' link inside the About dialog."""
     f = Path("flutter/lib/desktop/pages/desktop_setting_page.dart")
     src = f.read_text(encoding="utf-8")
     if "showGateInDeskSupportDialog" in src:
         print("About Support link: skip (already present)")
         return
 
-    # Anchor: Website InkWell (after our 'Личный кабинет' insert by patch_about_dialog).
     anchor = """InkWell(
                   onTap: () {
                     launchUrlString('https://gateindesk.azatmutq.com');
@@ -756,18 +698,13 @@ def patch_support_link_in_about():
 
 def patch_support_link_in_sidebar():
     """Insert a prominent 'Служба поддержки' button card in the desktop
-    home left pane, right after the built-in buildHelpCards (which renders
-    the update banner). The Support card uses the same visual style as
-    Material card buttons — icon + text, full-width, easy to spot.
-    """
+    home left pane, right after the built-in buildHelpCards."""
     f = Path("flutter/lib/desktop/pages/desktop_home_page.dart")
     src = f.read_text(encoding="utf-8")
     if "showGateInDeskSupportDialog" in src:
         print("sidebar Support: skip (already injected)")
         return
 
-    # Anchor: end of buildHelpCards FutureBuilder block + start of buildPluginEntry.
-    # Inject our Support card between them.
     anchor = """      FutureBuilder<Widget>(
         future: Future.value(
             Obx(() => buildHelpCards(stateGlobal.updateUrl.value))),
@@ -792,8 +729,6 @@ def patch_support_link_in_sidebar():
         print("sidebar Support: skip (buildHelpCards anchor not found)")
         return
 
-    # Prominent Support card — Material card style, full-width, icon+text.
-    # Sits between update banner and plugin entry → always visible.
     support_card = """      FutureBuilder<Widget>(
         future: Future.value(
             Obx(() => buildHelpCards(stateGlobal.updateUrl.value))),
@@ -849,6 +784,141 @@ def patch_support_link_in_sidebar():
     print("sidebar Support: prominent card injected below update banner")
 
 
+def patch_login_account_in_sidebar():
+    """Insert a Login button (or Account info when signed in) right under
+    the Support card. Reactive via Obx — flips automatically on login/logout."""
+    f = Path("flutter/lib/desktop/pages/desktop_home_page.dart")
+    src = f.read_text(encoding="utf-8")
+    if "GateInDesk login/account card" in src:
+        print("sidebar Login/Account: skip (already injected)")
+        return
+
+    login_import = "import 'package:flutter_hbb/common/widgets/login.dart';"
+    if login_import not in src:
+        anchor_import = "import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';"
+        src = src.replace(anchor_import, anchor_import + "\n" + login_import, 1)
+
+    anchor = """      // GateInDesk support card — always visible, opens form dialog.
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Material(
+          color: Color(0xFFEFF4FF),
+          borderRadius: BorderRadius.circular(8),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: () => showGateInDeskSupportDialog(context),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.support_agent, color: Color(0xFF0071FF), size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Служба поддержки',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Color(0xFF0071FF),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+      buildPluginEntry(),"""
+
+    if anchor not in src:
+        print("sidebar Login/Account: skip (Support card anchor not found)")
+        return
+
+    login_card = """      // GateInDesk support card — always visible, opens form dialog.
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Material(
+          color: Color(0xFFEFF4FF),
+          borderRadius: BorderRadius.circular(8),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: () => showGateInDeskSupportDialog(context),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.support_agent, color: Color(0xFF0071FF), size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Служба поддержки',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Color(0xFF0071FF),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+      // GateInDesk login/account card — reactive: shows Войти or account info.
+      Obx(() {
+        final loggedIn = gFFI.userModel.userName.value.isNotEmpty;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Material(
+            color: loggedIn ? Color(0xFFEAF7EE) : Color(0xFFF0FDF4),
+            borderRadius: BorderRadius.circular(8),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () {
+                if (loggedIn) {
+                  logOutConfirmDialog();
+                } else {
+                  loginDialog();
+                }
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      loggedIn ? Icons.account_circle : Icons.login,
+                      color: Color(0xFF16A34A),
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        loggedIn
+                            ? gFFI.userModel.displayNameOrUserName
+                            : 'Войти в аккаунт',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: Color(0xFF16A34A),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      }),
+      buildPluginEntry(),"""
+
+    src = src.replace(anchor, login_card)
+    f.write_text(src, encoding="utf-8")
+    print("sidebar Login/Account: reactive Obx card injected below Support")
+
+
 def main():
     if not Path("flutter").is_dir():
         sys.exit("error: run from rustdesk/ root (no flutter/ dir here)")
@@ -863,6 +933,7 @@ def main():
     patch_support_dialog()
     patch_telegram_link_below_powered()
     patch_support_link_in_sidebar()
+    patch_login_account_in_sidebar()
     patch_support_link_in_about()
     print("=== branding patches done ===")
 
