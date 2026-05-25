@@ -1,0 +1,401 @@
+name: Build Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload-tag:
+        description: 'Release tag (optional)'
+        type: string
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-android.yml'
+      - 'patches/branding.py'
+      - 'patches/branding/**'
+
+env:
+  RUSTDESK_REV: "1.4.6"
+  GD_VERSION: "1.0.7"
+  FLUTTER_VERSION: "3.24.5"
+  BRIDGE_FLUTTER_VERSION: "3.22.3"
+  RUST_VERSION: "1.75"
+  CARGO_EXPAND_VERSION: "1.0.95"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  CARGO_NDK_VERSION: "3.1.2"
+  NDK_VERSION: "r28c"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  APP_NAME: "GateInDesk"
+  ANDROID_PACKAGE: "com.gateinweb.gateindesk"
+
+jobs:
+  generate-bridge:
+    name: Generate flutter-rust-bridge
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Clone upstream rustdesk + submodules
+        shell: bash
+        run: |
+          git clone --depth=1 --branch=${RUSTDESK_REV} https://github.com/rustdesk/rustdesk.git rustdesk
+          cd rustdesk
+          git submodule update --init --recursive --depth=1
+      - name: Install Linux prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang cmake curl gcc git g++ libclang-dev libgtk-3-dev llvm-dev nasm ninja-build pkg-config wget
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: bridge-ubuntu-22.04
+          workspaces: rustdesk
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.BRIDGE_FLUTTER_VERSION }}
+          cache: true
+      - name: Install flutter_rust_bridge_codegen
+        shell: bash
+        run: |
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
+          cd rustdesk/flutter
+          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' pubspec.yaml
+          flutter pub get
+      - name: Run flutter-rust-bridge codegen
+        shell: bash
+        run: |
+          cd rustdesk
+          ~/.cargo/bin/flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+      - name: Upload bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-artifact
+          path: |
+            rustdesk/src/bridge_generated.rs
+            rustdesk/src/bridge_generated.io.rs
+            rustdesk/flutter/lib/generated_bridge.dart
+            rustdesk/flutter/lib/generated_bridge.freezed.dart
+            rustdesk/flutter/macos/Runner/bridge_generated.h
+            rustdesk/flutter/ios/Runner/bridge_generated.h
+          retention-days: 1
+
+  build-android:
+    name: GateInDesk Android ${{ matrix.job.arch }}
+    needs: generate-bridge
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { arch: aarch64, target: aarch64-linux-android,     android_abi: arm64-v8a,    flutter_platform: android-arm64, ndk_script: ndk_arm64.sh, sysroot_dir: aarch64-linux-android }
+          - { arch: armv7,   target: armv7-linux-androideabi,   android_abi: armeabi-v7a, flutter_platform: android-arm,   ndk_script: ndk_arm.sh,   sysroot_dir: arm-linux-androideabi }
+          - { arch: x86_64,  target: x86_64-linux-android,      android_abi: x86_64,      flutter_platform: android-x64,   ndk_script: ndk_x64.sh,   sysroot_dir: x86_64-linux-android }
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+
+    steps:
+      - name: Validate required secrets
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          missing=0
+          [ -z "$RENDEZVOUS_SERVER" ] && { echo "::error::RENDEZVOUS_SERVER not set"; missing=1; }
+          [ -z "$RS_PUB_KEY" ] && { echo "::error::RS_PUB_KEY not set"; missing=1; }
+          [ "$missing" = "1" ] && exit 1
+          echo "all required secrets present"
+
+      - name: Free disk space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Checkout meta-repo
+        uses: actions/checkout@v4
+        with:
+          path: meta
+
+      - name: Install build dependencies (apt)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang cmake curl gcc-multilib git g++ g++-multilib \
+            libayatana-appindicator3-dev libasound2-dev libc6-dev libclang-dev \
+            libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgtk-3-dev libpam0g-dev libpulse-dev libva-dev \
+            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxdo-dev libxfixes-dev llvm-dev nasm ninja-build \
+            openjdk-17-jdk-headless pkg-config tree wget imagemagick
+
+      - name: Clone upstream rustdesk + submodules
+        shell: bash
+        run: |
+          git clone --depth=1 --branch=${RUSTDESK_REV} https://github.com/rustdesk/rustdesk.git rustdesk
+          cd rustdesk
+          git submodule update --init --recursive --depth=1
+
+      - name: Restore flutter-rust-bridge artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: rustdesk/
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install Android vcpkg deps
+        shell: bash
+        run: |
+          cd rustdesk
+          if ! ./flutter/build_android_deps.sh "${{ matrix.job.android_abi }}"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | head -20 | while read -r f; do
+              echo "=== $f ==="; cat "$f"
+            done
+            exit 1
+          fi
+
+      - name: Patch config.rs fallback constants
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          set -e
+          cd rustdesk
+          F=libs/hbb_common/src/config.rs
+          SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
+          PUBKEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
+          sed -i "s|\"rs-ny.rustdesk.com\"|\"${SERVER}\"|g" "$F"
+          sed -i "s|\"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\"|\"${PUBKEY}\"|g" "$F"
+          grep -q "${SERVER}" "$F" || { echo "::error::server patch failed"; exit 1; }
+          echo "config.rs patched"
+
+      - name: Set GateInDesk version
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          sed -i 's|^version = "1.4.6"|version = "${{ env.GD_VERSION }}"|' Cargo.toml
+          if grep -qE '^version: ' flutter/pubspec.yaml; then
+            sed -i 's|^version: .*|version: ${{ env.GD_VERSION }}+${{ github.run_number }}|' flutter/pubspec.yaml
+          else
+            echo "version: ${{ env.GD_VERSION }}+${{ github.run_number }}" >> flutter/pubspec.yaml
+          fi
+
+      - name: Patch common.rs (disable signature verification)
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          F=src/common.rs
+          sed -i 's|let Ok(data) = sign::verify(&data, \&pk) else {|let _ = pk; let data = data; if false {|' "$F"
+          grep -q "if false {" "$F" || { echo "::error::common.rs patch failed"; exit 1; }
+
+      - name: Install GateInDesk branding (icons + assets)
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          cp ../meta/patches/branding/logo.png flutter/assets/logo.png
+          cp ../meta/patches/branding/icon.svg flutter/assets/icon.svg
+          # Replace all mipmap launcher icons with our brand PNG (resampled).
+          PNG="../meta/patches/branding/logo.png"
+          for dpi in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            for size_name in "ic_launcher" "ic_launcher_round" "ic_stat_logo"; do
+              DST="flutter/android/app/src/main/res/mipmap-${dpi}/${size_name}.png"
+              if [ -f "$DST" ]; then
+                # Resize to original file's pixel size (extract via identify)
+                W=$(identify -format "%w" "$DST" 2>/dev/null || echo 0)
+                if [ "$W" -gt 0 ]; then
+                  convert "$PNG" -resize "${W}x${W}" "$DST"
+                fi
+              fi
+            done
+          done
+          # Foreground for adaptive icon (mipmap-anydpi-v26 references it)
+          for dpi in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            DST="flutter/android/app/src/main/res/mipmap-${dpi}/ic_launcher_foreground.png"
+            if [ -f "$DST" ]; then
+              W=$(identify -format "%w" "$DST")
+              convert "$PNG" -resize "${W}x${W}" "$DST"
+            fi
+          done
+
+      - name: Apply branding patches (Dart URL sweep + lang + Python)
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+
+          sed -i 's|"powered_by_me", "Powered by RustDesk"|"powered_by_me", "Powered by GateInDesk"|' src/lang/en.rs
+          sed -i 's|"powered_by_me", "Основано на RustDesk"|"powered_by_me", "Работает на GateInDesk"|' src/lang/ru.rs
+          sed -i 's|https://api.rustdesk.com/version/latest|https://api.azatmutq.com/api/version/latest|' libs/hbb_common/src/lib.rs
+          sed -i 's|"setup_server_tip", "For faster connection, please set up your own server"|"setup_server_tip", "Open your personal account"|' src/lang/en.rs
+          sed -i 's|"setup_server_tip", "Для более быстрого подключения настройте собственный сервер."|"setup_server_tip", "Откройте личный кабинет"|' src/lang/ru.rs
+
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/privacy.html|https://gateindesk.azatmutq.com/privacy.html|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/download|https://download.azatmutq.com/gateindesk/|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/pricing|https://gateindesk.azatmutq.com/_admin/#/register|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|'https://rustdesk.com'|'https://gateindesk.azatmutq.com'|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|'https://rustdesk.com/'|'https://gateindesk.azatmutq.com/'|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i 's|"https://rustdesk.com"|"https://gateindesk.azatmutq.com"|g' {} +
+
+          sed -i 's|Purslane Ltd|GateInWeb|g' flutter/lib/desktop/pages/desktop_setting_page.dart
+          sed -i 's|"Slogan_tip", "Made with heart in this chaotic world!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/en.rs
+          sed -i 's|"Slogan_tip", "Сделано с душой в этом безумном мире!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/ru.rs
+
+          python3 ../meta/patches/branding.py
+          echo "branding patches applied"
+
+      - name: Patch AndroidManifest + strings (app label + package)
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          MANIFEST=flutter/android/app/src/main/AndroidManifest.xml
+          STRINGS=flutter/android/app/src/main/res/values/strings.xml
+          # Replace package + applicationId in AndroidManifest
+          sed -i 's|package="com\.carriez\.flutter_hbb"|package="${{ env.ANDROID_PACKAGE }}"|g' "$MANIFEST" || true
+          sed -i 's|android:label="RustDesk"|android:label="GateInDesk"|g' "$MANIFEST" || true
+          # Patch build.gradle applicationId
+          GRADLE=flutter/android/app/build.gradle
+          sed -i 's|applicationId "com\.carriez\.flutter_hbb"|applicationId "${{ env.ANDROID_PACKAGE }}"|g' "$GRADLE" || true
+          # Strings: app_name → GateInDesk
+          if [ -f "$STRINGS" ]; then
+            sed -i 's|<string name="app_name">RustDesk</string>|<string name="app_name">GateInDesk</string>|g' "$STRINGS"
+          fi
+          echo "=== AndroidManifest after patch ==="
+          grep -E "package|android:label" "$MANIFEST" | head -5
+          echo "=== build.gradle applicationId ==="
+          grep applicationId "$GRADLE" | head -3
+
+      - name: Install Rust toolchain (Android target)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rustdesk-android-${{ matrix.job.target }}
+          workspaces: rustdesk
+
+      - name: Build Rust liblibrustdesk.so (Android target)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          rustup target add ${{ matrix.job.target }}
+          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
+          ./flutter/${{ matrix.job.ndk_script }}
+          mkdir -p ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_abi }}
+          cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so \
+             ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_abi }}/librustdesk.so
+          # Copy libc++_shared.so from NDK sysroot
+          cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.job.sysroot_dir }}/libc++_shared.so \
+             ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_abi }}/
+          ls -la ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_abi }}/
+
+      - name: Build Flutter APK
+        shell: bash
+        env:
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+        run: |
+          set -e
+          cd rustdesk
+          export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
+          # Increase Gradle JVM memory
+          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
+          # Use debug keystore (no release ANDROID_SIGNING_KEY secret yet)
+          sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
+          cd flutter
+          flutter build apk --release --target-platform ${{ matrix.job.flutter_platform }} --split-per-abi
+          ls -la build/app/outputs/flutter-apk/
+
+      - name: Rename + collect APK
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          mkdir -p SignOutput
+          SRC=flutter/build/app/outputs/flutter-apk/app-${{ matrix.job.android_abi }}-release.apk
+          DST=SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.apk
+          mv "$SRC" "$DST"
+          ls -la "$DST"
+          sha256sum "$DST"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateindesk-android-${{ matrix.job.arch }}
+          path: rustdesk/SignOutput/
+          retention-days: 30
+
+      - name: Publish to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.upload-tag || env.GD_VERSION }}
+          prerelease: false
+          files: rustdesk/SignOutput/*.apk
+
+      - name: Deploy APK to VPS
+        if: env.VPS_KEY != ''
+        env:
+          VPS_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: claude-relay@78.24.218.158
+          VPS_PORT: 22
+        shell: bash
+        run: |
+          set -e
+          mkdir -p ~/.ssh
+          echo "$VPS_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${VPS_PORT} -H 78.24.218.158 >> ~/.ssh/known_hosts 2>/dev/null
+
+          APK="rustdesk/SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.apk"
+          REMOTE_DIR="/opt/mirrors/gateindesk/v${GD_VERSION}"
+
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo mkdir -p $REMOTE_DIR && sudo chown -R claude-relay:claude-relay $REMOTE_DIR"
+          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$APK" "$VPS_HOST:$REMOTE_DIR/"
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST \
+            "sudo chown www-data:www-data $REMOTE_DIR/*.apk && sudo chmod 644 $REMOTE_DIR/*.apk"
+          echo "deploy OK: ${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.apk at download.azatmutq.com/gateindesk/v${GD_VERSION}/"
