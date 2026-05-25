@@ -9,8 +9,6 @@ All patches are idempotent: repeat invocations are safe.
 import sys
 from pathlib import Path
 
-# Windows Python defaults to cp1252 for stdout. Force UTF-8 so log lines
-# survive (file writes already pin encoding='utf-8' explicitly).
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
@@ -67,14 +65,7 @@ def patch_user_model_oidc():
 
 
 def patch_download_filename():
-    """flutter_ffi.rs main_get_common handler for 'download-file-{version}' is
-    hardcoded to return 'rustdesk-{v}-x86_64.{msi|exe}'. We must:
-      1. swap 'rustdesk-' -> our app-name (so URL = GateInDesk-1.0.1-x86_64.msi)
-      2. always return .msi for custom-client when MSI is installed (upstream
-         logic returns .exe for is_custom_client=true, but we DO ship MSI)
-    Fix: replace the entire match arm block with simpler 2-arm logic that
-    uses our app-name and prefers MSI.
-    """
+    """flutter_ffi.rs download-file handler: use our app-name, always .msi when installed."""
     f = Path("src/flutter_ffi.rs")
     src = f.read_text(encoding="utf-8")
     if "GD_PATCHED_DOWNLOAD_FILE" in src:
@@ -112,11 +103,6 @@ def patch_download_filename():
         print("download-file: skip (anchor not found — upstream changed?)")
         return
     src = src.replace(old, new, 1)
-
-    # Same fix for macOS — original wraps the string in format!(...), so we
-    # only replace the literal STRING inside, keeping the outer format! intact.
-    # But format!("literal") has no interpolation, while we need {} + args.
-    # Easier: replace the whole format!(...) call instead.
     src = src.replace(
         'format!("rustdesk-{_version}-x86_64.dmg")',
         'format!("{}-{}-x86_64.dmg", crate::get_app_name(), _version)',
@@ -131,33 +117,13 @@ def patch_download_filename():
 
 
 def patch_remove_update_guard_buildhelpcards():
-    """THIRD is_custom_client guard for updates lives in
-    desktop_home_page.dart:432-457 buildHelpCards(). Two filters block
-    custom-clients from ever seeing the update card:
-
-      if (!bind.isCustomClient() &&
-          updateUrl.isNotEmpty &&
-          !isCardClosed &&
-          bind.mainUriPrefixSync().contains('rustdesk')) {
-
-    Even with Rust + checkUpdate Dart guards removed (so the call
-    fires and updateUrl gets populated), this widget refuses to render
-    the banner for our fork. Found 2026-05-25 after nginx access log
-    confirmed 3 successful POST /api/version/latest with HTTP 200 but
-    no banner shown.
-
-    Also rewrites two upstream URLs inside the card:
-      - https://rustdesk.com/download  -> https://download.azatmutq.com/gateindesk/
-      - https://github.com/rustdesk/rustdesk/releases/tag/X
-                                       -> https://github.com/snookerm/Gateindesk/releases
-    """
+    """Remove THIRD is_custom_client guard in buildHelpCards + rewrite URLs."""
     f = Path("flutter/lib/desktop/pages/desktop_home_page.dart")
     src = f.read_text(encoding="utf-8")
     if "GD_PATCHED_BUILDHELPCARDS" in src:
         print("buildHelpCards guard: skip (already patched)")
         return
 
-    # Remove the two upstream-only filters
     old_guard = (
         "    if (!bind.isCustomClient() &&\n"
         "        updateUrl.isNotEmpty &&\n"
@@ -172,14 +138,10 @@ def patch_remove_update_guard_buildhelpcards():
         print("buildHelpCards guard: skip (guard anchor not found)")
         return
     src = src.replace(old_guard, new_guard, 1)
-
-    # Rewrite upstream URL for the Download branch (fallback when not installed)
     src = src.replace(
         "final Uri url = Uri.parse('https://rustdesk.com/download');",
         "final Uri url = Uri.parse('https://download.azatmutq.com/gateindesk/');",
     )
-
-    # Rewrite changelog link to our repo releases
     src = src.replace(
         "'https://github.com/rustdesk/rustdesk/releases/tag/${bind.mainGetNewVersion()}'",
         "'https://github.com/snookerm/Gateindesk/releases'",
@@ -190,14 +152,7 @@ def patch_remove_update_guard_buildhelpcards():
 
 
 def patch_remove_update_guard_dart():
-    """RustDesk has TWO is_custom_client guards for update checks:
-    one in Rust (common.rs check_software_update — handled by
-    patch_remove_update_guard) AND one in Dart (common.dart:3976-3991
-    checkUpdate). The Dart one blocks the actual call to
-    mainGetSoftwareUpdateUrl, so even with Rust patched the function
-    never fires. Found 2026-05-25 after empirical test on user machine
-    showed 0 TCP connections to api.azatmutq.com.
-    """
+    """Dart-side checkUpdate guard removal (common.dart)."""
     f = Path("flutter/lib/common.dart")
     src = f.read_text(encoding="utf-8")
     needle = (
@@ -211,7 +166,6 @@ def patch_remove_update_guard_dart():
         else:
             print("update guard (Dart): skip (anchor not found)")
         return
-    # Replace: drop the inner `if (!bind.isCustomClient()) {` and its closing brace.
     old_block = (
         "void checkUpdate() {\n"
         "  if (!isWeb) {\n"
@@ -247,7 +201,7 @@ def patch_remove_update_guard_dart():
         "}\n"
     )
     if old_block not in src:
-        print("update guard (Dart): skip (block anchor not found — upstream changed?)")
+        print("update guard (Dart): skip (block anchor not found)")
         return
     src = src.replace(old_block, new_block, 1)
     f.write_text(src, encoding="utf-8")
@@ -255,12 +209,7 @@ def patch_remove_update_guard_dart():
 
 
 def patch_remove_update_guard():
-    """Remove `if is_custom_client() { return; }` guard at the top of
-    check_software_update so OUR fork actually polls /api/version/latest.
-
-    The original guard is multi-line — sed in workflow can't match across
-    newlines reliably, so this Python patch does it.
-    """
+    """Remove is_custom_client guard in check_software_update."""
     f = Path("src/common.rs")
     src = f.read_text(encoding="utf-8")
     needle = (
@@ -273,10 +222,9 @@ def patch_remove_update_guard():
         if "pub fn check_software_update() {\n    let opt" in src:
             print("update guard: skip (already removed)")
         else:
-            print("update guard: skip (anchor not found — upstream changed?)")
+            print("update guard: skip (anchor not found)")
         return
-    replacement = "pub fn check_software_update() {\n"
-    src = src.replace(needle, replacement, 1)
+    src = src.replace(needle, "pub fn check_software_update() {\n", 1)
     f.write_text(src, encoding="utf-8")
     print("update guard: is_custom_client early-return removed")
 
@@ -306,9 +254,6 @@ def patch_main_window_icon():
 
     helper = (
         "\n"
-        "// Set window icon via absolute path (window_manager LoadImage requires\n"
-        "// LR_LOADFROMFILE to resolve from process CWD which is unreliable when\n"
-        "// app is launched from Start Menu/shortcut). Built from exe dir.\n"
         "void _setGateInDeskWindowIcon() {\n"
         "  try {\n"
         "    final exeDir = File(Platform.resolvedExecutable).parent.path;\n"
@@ -333,11 +278,11 @@ def patch_main_window_icon():
             src = src[:first_import] + import_line + src[first_import:]
 
     f.write_text(src, encoding="utf-8")
-    print("main.dart: _setGateInDeskWindowIcon helper injected (absolute path)")
+    print("main.dart: _setGateInDeskWindowIcon helper injected")
 
 
 def patch_login_register_button():
-    """Add Регистрация TextButton under the Login button in user/pass login form."""
+    """Add Регистрация TextButton under the Login button."""
     f = Path("flutter/lib/common/widgets/login.dart")
     src = f.read_text(encoding="utf-8")
     if "'Регистрация'" in src:
@@ -384,12 +329,11 @@ def patch_login_register_button():
 
 
 def patch_support_dialog():
-    """Inject the support dialog implementation into common.dart so it can
-    be invoked from anywhere (sidebar, About, etc)."""
+    """Inject support dialog implementation into common.dart."""
     f = Path("flutter/lib/common.dart")
     src = f.read_text(encoding="utf-8")
     if "showGateInDeskSupportDialog" in src:
-        print("support dialog: skip (already injected in common.dart)")
+        print("support dialog: skip (already injected)")
         return
 
     if "as gd_http;" not in src:
@@ -407,19 +351,13 @@ def patch_support_dialog():
 
     helper = '''
 
-// ────────────────────────────────────────────────────────────────────
-// GateInDesk support form (added by patches/branding.py)
-// POST https://api.azatmutq.com/api/support → SMTP to gurgen@gateinweb.ru
-// Optional attached logs (text concat, base64) up to ~3 MB.
-// ────────────────────────────────────────────────────────────────────
-
 String? _collectGateInDeskLogs() {
   try {
     String? appData = Platform.environment['APPDATA'];
     appData ??= Platform.environment['HOME'];
     if (appData == null || appData.isEmpty) return null;
 
-    final appName = bind.mainGetAppNameSync();  // "GateInDesk"
+    final appName = bind.mainGetAppNameSync();
     final sep = Platform.pathSeparator;
     final logDir = Directory(appData + sep + appName + sep + 'log');
     debugPrint('GD logs: scanning ' + logDir.path);
@@ -435,7 +373,6 @@ String? _collectGateInDeskLogs() {
         .toList()
       ..sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
     final picked = files.take(5).toList();
-    debugPrint('GD logs: picked ' + picked.length.toString() + ' files');
     if (picked.isEmpty) return null;
 
     final buf = StringBuffer();
@@ -455,12 +392,9 @@ String? _collectGateInDeskLogs() {
           buf.write(content);
         }
         buf.writeln('');
-      } catch (_) {
-      }
+      } catch (_) {}
     }
-    final result = buf.toString();
-    debugPrint('GD logs: collected ' + result.length.toString() + ' chars');
-    return result;
+    return buf.toString();
   } catch (e) {
     debugPrint('GD logs: failed: ' + e.toString());
     return null;
@@ -697,8 +631,7 @@ def patch_support_link_in_about():
 
 
 def patch_support_link_in_sidebar():
-    """Insert a prominent 'Служба поддержки' button card in the desktop
-    home left pane, right after the built-in buildHelpCards."""
+    """Insert prominent 'Служба поддержки' card in desktop sidebar."""
     f = Path("flutter/lib/desktop/pages/desktop_home_page.dart")
     src = f.read_text(encoding="utf-8")
     if "showGateInDeskSupportDialog" in src:
@@ -785,8 +718,7 @@ def patch_support_link_in_sidebar():
 
 
 def patch_login_account_in_sidebar():
-    """Insert a Login button (or Account info when signed in) right under
-    the Support card. Reactive via Obx — flips automatically on login/logout."""
+    """Insert Login/Account card under Support card. Reactive via Obx."""
     f = Path("flutter/lib/desktop/pages/desktop_home_page.dart")
     src = f.read_text(encoding="utf-8")
     if "GateInDesk login/account card" in src:
@@ -919,6 +851,88 @@ def patch_login_account_in_sidebar():
     print("sidebar Login/Account: reactive Obx card injected below Support")
 
 
+# ============================================================
+# NEW: Mobile-specific patches (Android/iOS)
+# ============================================================
+
+def patch_mobile_about_link():
+    """Replace 'rustdesk.com' text literal in mobile Settings → About.
+
+    Mobile settings_page.dart:955 + 1098 render `Text('rustdesk.com', ...)`
+    as user-visible label under Version. The global Dart URL sweep in the
+    workflow only catches 'https://rustdesk.com' (with scheme) — this is
+    a plain text label, not a URL, so it needs explicit replacement.
+    """
+    f = Path("flutter/lib/mobile/pages/settings_page.dart")
+    src = f.read_text(encoding="utf-8")
+    if "Text('gateindesk.azatmutq.com'," in src and "Text('rustdesk.com'," not in src:
+        print("mobile about link: skip (already patched)")
+        return
+    if "Text('rustdesk.com'," not in src:
+        print("mobile about link: skip (anchor not found)")
+        return
+    src = src.replace("Text('rustdesk.com',", "Text('gateindesk.azatmutq.com',")
+    f.write_text(src, encoding="utf-8")
+    print("mobile about link: 'rustdesk.com' text literal replaced")
+
+
+def patch_android_custom_txt_loader():
+    """Embed Android custom.txt loader in main.dart.
+
+    Without this, Android APK ignores override-settings (hide-server-settings,
+    force custom-rendezvous-server, api-server) → user sees default RustDesk
+    UI defaults, may switch to public RustDesk server, no branding overrides.
+    """
+    f = Path("flutter/lib/main.dart")
+    src = f.read_text(encoding="utf-8")
+    if "_copyAndroidCustomTxt" in src:
+        print("main.dart Android custom.txt: skip (already injected)")
+        return
+
+    needed_imports = []
+    if "package:path_provider/path_provider.dart" not in src:
+        needed_imports.append("import 'package:path_provider/path_provider.dart' as _gd_pp;")
+    if "package:flutter/services.dart" not in src:
+        needed_imports.append("import 'package:flutter/services.dart' show rootBundle;")
+    if "import 'dart:io'" not in src:
+        needed_imports.append("import 'dart:io';")
+
+    if needed_imports:
+        first_import = src.find("import ")
+        if first_import != -1:
+            src = src[:first_import] + "\n".join(needed_imports) + "\n" + src[first_import:]
+
+    helper = '''
+
+// GateInDesk: copy bundled custom.txt from APK assets to app docs dir at
+// first launch on Android. Rust runtime reads custom.txt from local FS.
+Future<void> _copyAndroidCustomTxt() async {
+  if (!isAndroid) return;
+  try {
+    final data = await rootBundle.loadString('assets/custom.txt');
+    final dir = await _gd_pp.getApplicationDocumentsDirectory();
+    final dst = File('\\${dir.path}/custom.txt');
+    if (!await dst.exists() || (await dst.readAsString()) != data) {
+      await dst.writeAsString(data);
+      debugPrint('GD: custom.txt copied to \\${dst.path} (\\${data.length} bytes)');
+    }
+  } catch (e) {
+    debugPrint('GD custom.txt copy failed: \\$e');
+  }
+}
+'''
+    if not src.rstrip().endswith("}"):
+        src += "\n"
+    src += helper
+
+    anchor = "WidgetsFlutterBinding.ensureInitialized();"
+    if anchor in src and "_copyAndroidCustomTxt();" not in src:
+        src = src.replace(anchor, anchor + "\n  await _copyAndroidCustomTxt();", 1)
+
+    f.write_text(src, encoding="utf-8")
+    print("main.dart: _copyAndroidCustomTxt() injected (Android-only at startup)")
+
+
 def main():
     if not Path("flutter").is_dir():
         sys.exit("error: run from rustdesk/ root (no flutter/ dir here)")
@@ -935,6 +949,8 @@ def main():
     patch_support_link_in_sidebar()
     patch_login_account_in_sidebar()
     patch_support_link_in_about()
+    patch_mobile_about_link()
+    patch_android_custom_txt_loader()
     print("=== branding patches done ===")
 
 
