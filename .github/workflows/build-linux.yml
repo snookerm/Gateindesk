@@ -127,6 +127,9 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
+          # NOTE: dropped fuse + libfuse2 — they conflict with fuse3 on
+          # ubuntu-22.04 (held packages error). appimagetool uses
+          # --appimage-extract-and-run instead, no FUSE mount needed.
           sudo apt-get install -y \
             build-essential clang cmake curl gcc git g++ \
             libayatana-appindicator3-dev libasound2-dev libclang-dev \
@@ -134,7 +137,7 @@ jobs:
             libgtk-3-dev libpam0g-dev libpulse-dev libva-dev \
             libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxdo-dev libxfixes-dev llvm-dev nasm ninja-build pkg-config \
-            tree wget imagemagick fuse libfuse2 dpkg-dev
+            tree wget imagemagick dpkg-dev
 
       - name: Clone upstream rustdesk + submodules
         shell: bash
@@ -353,7 +356,7 @@ jobs:
           ls -la "$DEB_OUT"
           dpkg-deb --info "$DEB_OUT"
 
-      - name: Build AppImage
+      - name: Build AppImage (without FUSE — extract-and-run mode)
         shell: bash
         run: |
           set -e
@@ -379,7 +382,9 @@ jobs:
           cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME,,}.png" "$APPDIR/${APP_NAME,,}.png"
           cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME,,}.png" "$APPDIR/.DirIcon"
 
-          ARCH=x86_64 ./appimagetool-x86_64.AppImage --no-appstream "$APPDIR" \
+          # --appimage-extract-and-run: unpack appimagetool to /tmp and run it
+          # without needing FUSE on the host (ubuntu-22.04 has no libfuse2 by default).
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run --no-appstream "$APPDIR" \
             "SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.AppImage"
           chmod +x "SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.AppImage"
           ls -la SignOutput/
