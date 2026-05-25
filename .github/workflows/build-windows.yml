@@ -18,7 +18,7 @@ env:
   RUSTDESK_REV: "1.4.6"
   # GateInDesk own semver — bump THIS for releases. Updated on Cargo.toml,
   # pubspec.yaml, MSI filename, Release tag, deploy URL. One source of truth.
-  GD_VERSION: "1.0.5"
+  GD_VERSION: "1.0.6"
   FLUTTER_VERSION: "3.24.5"
   BRIDGE_FLUTTER_VERSION: "3.22.3"
   RUST_VERSION: "1.75"
@@ -102,7 +102,7 @@ jobs:
           retention-days: 1
 
   build-windows:
-    name: GateInDesk Windows x86_64 (MSI installer)
+    name: GateInDesk Windows x86_64 (MSI + Portable QS)
     needs: generate-bridge
     runs-on: windows-2022
     timeout-minutes: 120
@@ -202,7 +202,7 @@ jobs:
           fi
           sed -i 's|let Ok(data) = sign::verify(&data, \&pk) else {|let _ = pk; let data = data; if false {|' "$F"
           AFTER=$(grep -c "if false {" "$F" || echo 0)
-          echo "common.rs patched (sign::verify dead-branched). 'if false {' count: $AFTER"
+          echo "common.rs patched. 'if false {' count: $AFTER"
 
       - name: Install GateInDesk branding
         shell: bash
@@ -352,6 +352,51 @@ jobs:
           "
           ls -la ./gateindesk/custom.txt
 
+      - name: Build Portable Quick Support .exe (libs/portable packer)
+        shell: pwsh
+        env:
+          APP_NAME: ${{ env.APP_NAME }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location rustdesk
+
+          # 1) Snapshot the Flutter Release folder + custom.txt for portable use.
+          #    MSI preprocess writes into ./gateindesk/, so we use a sibling copy.
+          Copy-Item -Recurse -Force ./gateindesk ./gateindesk-portable
+          Write-Host "=== portable snapshot ==="
+          Get-ChildItem ./gateindesk-portable | Select-Object Name,Length | Format-Table -AutoSize
+
+          # 2) Rebrand the portable packer's local-extract dir:
+          #    libs/portable/src/main.rs uses APP_PREFIX = "rustdesk" which
+          #    becomes %LOCALAPPDATA%/rustdesk/<ts>/. Force gateindesk.
+          $portableMain = "libs/portable/src/main.rs"
+          (Get-Content -Raw $portableMain) `
+            -replace 'const APP_PREFIX: &str = "rustdesk";', 'const APP_PREFIX: &str = "gateindesk";' `
+            | Set-Content -NoNewline $portableMain
+          Write-Host "=== APP_PREFIX patched ==="
+          Select-String -Path $portableMain -Pattern "APP_PREFIX"
+
+          # 3) Pack: brotli-compress the gateindesk-portable/ folder into data.bin
+          Push-Location libs/portable
+          pip install -r requirements.txt
+          python3 .\generate.py -f ../../gateindesk-portable -o . -e "./$($env:APP_NAME).exe"
+
+          # 4) Compile the packer binary — it embeds data.bin + extracts at runtime.
+          cargo build --release
+          Pop-Location
+
+          # 5) Move output to SignOutput with our naming convention.
+          New-Item -ItemType Directory -Force -Path ./SignOutput | Out-Null
+          $packerExe = "./target/release/rustdesk-portable-packer.exe"
+          if (-not (Test-Path $packerExe)) {
+            Write-Host "::error::portable packer not built — $packerExe missing"
+            exit 1
+          }
+          $portableOut = "./SignOutput/$($env:APP_NAME)-QS-$($env:GD_VERSION)-x86_64.exe"
+          Move-Item -Force $packerExe $portableOut
+          Write-Host "=== portable QS exe ==="
+          Get-Item $portableOut | Select-Object Name,Length,LastWriteTime
+
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
@@ -426,13 +471,13 @@ jobs:
         shell: bash
         run: |
           cd rustdesk/SignOutput
-          sha256sum *.msi > SHA256SUMS
+          sha256sum *.msi *.exe > SHA256SUMS
           cat SHA256SUMS
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gateindesk-windows-x86_64-msi
+          name: gateindesk-windows-x86_64
           path: rustdesk/SignOutput/
           retention-days: 30
 
@@ -443,7 +488,7 @@ jobs:
           prerelease: false
           files: rustdesk/SignOutput/*
 
-      - name: Deploy MSI to VPS + bump version endpoint
+      - name: Deploy MSI + Portable to VPS + bump version endpoint
         if: env.VPS_KEY != ''
         env:
           VPS_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -458,19 +503,28 @@ jobs:
           ssh-keyscan -p ${VPS_PORT} -H 78.24.218.158 >> ~/.ssh/known_hosts 2>/dev/null
 
           MSI="rustdesk/SignOutput/${APP_NAME}-${GD_VERSION}-x86_64.msi"
-          REMOTE_DIR="/opt/mirrors/gateindesk/v${GD_VERSION}"
+          QS_EXE="rustdesk/SignOutput/${APP_NAME}-QS-${GD_VERSION}-x86_64.exe"
+          INSTALLER_DIR="/opt/mirrors/gateindesk/v${GD_VERSION}"
+          PORTABLE_DIR="/opt/mirrors/gateindesk/portable/v${GD_VERSION}"
           REMOTE_LATEST="/opt/mirrors/gateindesk"
 
-          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo mkdir -p $REMOTE_DIR && sudo chown claude-relay:claude-relay $REMOTE_DIR"
-          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$MSI" "$VPS_HOST:$REMOTE_DIR/"
-          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo chown www-data:www-data $REMOTE_DIR/*.msi && sudo chmod 644 $REMOTE_DIR/*.msi"
+          # 1) Upload MSI to /v{V}/ + Portable to /portable/v{V}/
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo mkdir -p $INSTALLER_DIR $PORTABLE_DIR && sudo chown -R claude-relay:claude-relay /opt/mirrors/gateindesk/v${GD_VERSION} /opt/mirrors/gateindesk/portable"
+          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$MSI"    "$VPS_HOST:$INSTALLER_DIR/"
+          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$QS_EXE" "$VPS_HOST:$PORTABLE_DIR/"
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST \
+            "sudo chown www-data:www-data $INSTALLER_DIR/*.msi $PORTABLE_DIR/*.exe && \
+             sudo chmod 644 $INSTALLER_DIR/*.msi $PORTABLE_DIR/*.exe"
 
+          # 2) Bump /api/version/latest JSON in nginx (semver, no 'v' prefix).
           NEW_JSON="{\"version\":\"${GD_VERSION}\",\"url\":\"https://github.com/snookerm/Gateindesk/releases/tag/${GD_VERSION}\"}"
           ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo sed -i 's|return 200 .*|return 200 '\''${NEW_JSON}'\'';|' /etc/nginx/sites-available/api.azatmutq.com && sudo nginx -t && sudo systemctl reload nginx"
 
-          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo cp $REMOTE_DIR/*.msi $REMOTE_LATEST/${APP_NAME}-${GD_VERSION}-x86_64.msi"
+          # 3) Mirror root copies for backward-compat (download page expects them under root)
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo cp $INSTALLER_DIR/*.msi $REMOTE_LATEST/${APP_NAME}-${GD_VERSION}-x86_64.msi"
 
+          # 4) Smoke-test version endpoint
           DEPLOYED=$(curl -s -X POST https://api.azatmutq.com/api/version/latest -H 'Content-Type: application/json' -d '{}')
           echo "deployed: $DEPLOYED"
           echo "$DEPLOYED" | grep -q "${GD_VERSION}" || { echo "::error::version not reflected"; exit 1; }
-          echo "deploy OK: v${GD_VERSION} live at download.azatmutq.com/gateindesk/v${GD_VERSION}/"
+          echo "deploy OK: v${GD_VERSION} MSI + Portable QS live on download.azatmutq.com/gateindesk/"
