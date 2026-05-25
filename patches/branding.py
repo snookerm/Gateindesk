@@ -370,18 +370,79 @@ def patch_support_dialog():
             "import 'utils/http_service.dart' as gd_http;\n"
         ) + src[first_import:]
 
+    # Ensure dart:io and url_launcher are imported (for File/Platform/launchUrl).
+    # common.dart already imports url_launcher but check; dart:io may or may not be.
+    if "import 'dart:io'" not in src:
+        first_import = src.find("import ")
+        src = src[:first_import] + "import 'dart:io';\n" + src[first_import:]
+    if "package:url_launcher/url_launcher.dart" not in src:
+        first_import = src.find("import ")
+        src = src[:first_import] + "import 'package:url_launcher/url_launcher.dart';\n" + src[first_import:]
+
     helper = '''
 
 // ────────────────────────────────────────────────────────────────────
 // GateInDesk support form (added by patches/branding.py)
 // POST https://api.azatmutq.com/api/support → SMTP to gurgen@gateinweb.ru
+// Optional attached logs (text concat, base64) up to ~3 MB.
 // ────────────────────────────────────────────────────────────────────
+
+// Collect last N rotated GateInDesk_r*.log files from %APPDATA%/GateInDesk/log
+// (or platform-equivalent), concat with file headers, cap total size to 3 MB.
+// Returns null if nothing found or error.
+String? _collectGateInDeskLogs() {
+  try {
+    final appData = Platform.environment['APPDATA']
+        ?? Platform.environment['HOME']
+        ?? '';
+    if (appData.isEmpty) return null;
+    final logDir = Directory('\\$appData\\\\GateInDesk\\\\log');
+    if (!logDir.existsSync()) return null;
+
+    // Pick last 5 log files by modification time (newest first).
+    final files = logDir
+        .listSync()
+        .whereType<File>()
+        .where((f) => f.path.toLowerCase().endsWith('.log'))
+        .toList()
+      ..sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
+    final picked = files.take(5).toList();
+    if (picked.isEmpty) return null;
+
+    final buf = StringBuffer();
+    const int maxBytes = 3 * 1024 * 1024;  // 3 MB cap before base64
+    for (final f in picked) {
+      if (buf.length >= maxBytes) break;
+      try {
+        final name = f.path.split(Platform.pathSeparator).last;
+        buf.writeln('=== FILE: \\$name (\\${f.statSync().size} bytes, mod \\${f.statSync().modified.toIso8601String()}) ===');
+        final content = f.readAsStringSync();
+        final remaining = maxBytes - buf.length;
+        if (content.length > remaining) {
+          buf.writeln('[truncated to \\$remaining bytes]');
+          buf.write(content.substring(0, remaining));
+        } else {
+          buf.write(content);
+        }
+        buf.writeln('\\n');
+      } catch (_) {
+        // skip unreadable
+      }
+    }
+    return buf.toString();
+  } catch (e) {
+    debugPrint('_collectGateInDeskLogs failed: \\$e');
+    return null;
+  }
+}
+
 void showGateInDeskSupportDialog(BuildContext context) {
   final nameCtl    = TextEditingController();
   final emailCtl   = TextEditingController();
   final phoneCtl   = TextEditingController();
   final messageCtl = TextEditingController();
   bool sending = false;
+  bool attachLogs = true;  // default on — diagnostic value usually wanted
   String? status;
   bool isError = false;
 
@@ -398,15 +459,22 @@ void showGateInDeskSupportDialog(BuildContext context) {
       }
       setState(() { sending = true; status = null; isError = false; });
       try {
+        final body = <String, dynamic>{
+          'name': nameCtl.text.trim(),
+          'email': emailCtl.text.trim(),
+          'phone': phoneCtl.text.trim(),
+          'message': messageCtl.text.trim(),
+        };
+        if (attachLogs) {
+          final logs = _collectGateInDeskLogs();
+          if (logs != null && logs.isNotEmpty) {
+            body['logs_text_b64'] = base64Encode(utf8.encode(logs));
+          }
+        }
         final resp = await gd_http.post(
           Uri.parse('https://api.azatmutq.com/api/support'),
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'name': nameCtl.text.trim(),
-            'email': emailCtl.text.trim(),
-            'phone': phoneCtl.text.trim(),
-            'message': messageCtl.text.trim(),
-          }),
+          body: jsonEncode(body),
         );
         if (resp.statusCode == 200) {
           setState(() {
@@ -418,7 +486,7 @@ void showGateInDeskSupportDialog(BuildContext context) {
         } else {
           setState(() {
             sending = false;
-            status = "Ошибка сервера: ${resp.statusCode}";
+            status = "Ошибка сервера: \\${resp.statusCode}";
             isError = true;
           });
         }
@@ -450,9 +518,44 @@ void showGateInDeskSupportDialog(BuildContext context) {
             maxLines: 5,
             minLines: 3,
           ),
+          const SizedBox(height: 8),
+          // Attach-logs checkbox (default ON)
+          InkWell(
+            onTap: () => setState(() => attachLogs = !attachLogs),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  Checkbox(
+                    value: attachLogs,
+                    onChanged: (v) => setState(() => attachLogs = v ?? false),
+                  ),
+                  const Expanded(
+                    child: Text(
+                      "Приложить логи приложения (последние ~3 MB)",
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // Visit-our-site link
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+              onPressed: () => launchUrl(
+                Uri.parse('https://gateindesk.azatmutq.com'),
+                mode: LaunchMode.externalApplication,
+              ),
+              icon: const Icon(Icons.open_in_new, size: 14),
+              label: const Text('Перейти на сайт', style: TextStyle(fontSize: 13)),
+            ),
+          ),
           if (status != null)
             Padding(
-              padding: const EdgeInsets.only(top: 12),
+              padding: const EdgeInsets.only(top: 8),
               child: Text(status!,
                 style: TextStyle(
                   color: isError ? Colors.red : Colors.green,
@@ -461,7 +564,7 @@ void showGateInDeskSupportDialog(BuildContext context) {
               ),
             ),
           if (sending) const Padding(
-            padding: EdgeInsets.only(top: 12),
+            padding: EdgeInsets.only(top: 8),
             child: LinearProgressIndicator(),
           ),
         ],

@@ -18,7 +18,7 @@ env:
   RUSTDESK_REV: "1.4.6"
   # GateInDesk own semver — bump THIS for releases. Updated on Cargo.toml,
   # pubspec.yaml, MSI filename, Release tag, deploy URL. One source of truth.
-  GD_VERSION: "1.0.0"
+  GD_VERSION: "1.0.1"
   FLUTTER_VERSION: "3.24.5"
   BRIDGE_FLUTTER_VERSION: "3.22.3"
   RUST_VERSION: "1.75"
@@ -189,6 +189,8 @@ jobs:
           cd rustdesk
           # 1) Cargo.toml — drives crate::VERSION (env!("CARGO_PKG_VERSION"))
           #    used by check_software_update comparison.
+          # Cargo.toml upstream is always "1.4.6" (we clone tag 1.4.6 fresh
+          # each build), so anchor literal "1.4.6" — not env value.
           sed -i 's|^version = "1.4.6"|version = "${{ env.GD_VERSION }}"|' Cargo.toml
           grep -q '^version = "${{ env.GD_VERSION }}"' Cargo.toml \
             || { echo "::error::Cargo.toml version patch failed"; exit 1; }
