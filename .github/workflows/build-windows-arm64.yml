@@ -176,6 +176,16 @@ jobs:
           sed -i 's|let Ok(data) = sign::verify(&data, \&pk) else {|let _ = pk; let data = data; if false {|' "$F"
           grep -q "if false {" "$F" || { echo "::error::common.rs patch failed"; exit 1; }
 
+      - name: Patch build.py for ARM64 target
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          # Make flutter build windows respect --target-platform windows-arm64
+          # (default builds x64 host arch on the windows-2022 runner).
+          sed -i "s|flutter build windows --release|flutter build windows --release --target-platform windows-arm64|g" build.py
+          grep "flutter build windows" build.py | head -3
+
       - name: Install GateInDesk branding
         shell: bash
         run: |
@@ -268,14 +278,21 @@ jobs:
             sleep $((n*60))
           done
 
-      - name: Build RustDesk ARM64 binary (build.py)
+      - name: Build RustDesk ARM64 binary (build.py, no hwcodec/vram)
         shell: pwsh
         env:
           # Force Rust to use ARM64 target. build.py inherits cargo default target.
           CARGO_BUILD_TARGET: aarch64-pc-windows-msvc
+          # Force cc-rs to look up arm64 vcpkg installed includes.
+          VCPKG_DEFAULT_TRIPLET: arm64-windows-static
+          VCPKG_DEFAULT_HOST_TRIPLET: arm64-windows-static
         run: |
           cd rustdesk
-          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          # NB: --hwcodec and --vram dropped for ARM64. Hardware video encoders
+          # (AMD AMF, NVIDIA NVENC, Intel MediaSDK) have NO ARM64 binaries —
+          # build fails when cc-rs tries to compile MediaSDK C++ for ARM target.
+          # Software-only encoding works; quality OK on Snapdragon X / Cortex-X.
+          python3 .\build.py --portable --flutter --skip-portable-pack
           Move-Item -Force ./flutter/build/windows/arm64/runner/Release ./gateindesk
           if (Test-Path ./gateindesk/rustdesk.exe) {
             Move-Item -Force ./gateindesk/rustdesk.exe "./gateindesk/${env:APP_NAME}.exe"
