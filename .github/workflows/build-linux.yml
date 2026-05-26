@@ -386,7 +386,7 @@ jobs:
           Priority: optional
           Architecture: ${{ matrix.job.deb_arch }}
           Depends: libgtk-3-0, libxcb-randr0, libxcb-xfixes0, libxcb-shape0, libxdo3, libxfixes3, libayatana-appindicator3-1, libpam0g, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libpulse0, libva-drm2, libva-x11-2
-          Maintainer: GateInWeb <support@gateinweb.ru>
+          Maintainer: GateInWeb <support@azatmutq.com>
           Homepage: https://gateindesk.azatmutq.com
           Description: ${APP_NAME} - secure remote desktop access
            ${APP_NAME} is a self-hosted RustDesk-based remote support
