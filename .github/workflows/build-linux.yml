@@ -191,7 +191,7 @@ jobs:
             exit 1
           fi
 
-      - name: Patch config.rs fallback constants
+      - name: Patch config.rs fallback constants + APP_NAME default + api hardcode
         shell: bash
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
@@ -202,9 +202,17 @@ jobs:
           F=libs/hbb_common/src/config.rs
           SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
           PUBKEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
+          API="https://api.azatmutq.com"
           sed -i "s|\"rs-ny.rustdesk.com\"|\"${SERVER}\"|g" "$F"
           sed -i "s|\"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\"|\"${PUBKEY}\"|g" "$F"
+          sed -i 's|RwLock::new("RustDesk".to_owned())|RwLock::new("GateInDesk".to_owned())|' "$F"
+          sed -i "s|PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(\"\".to_owned())|PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(\"${SERVER}\".to_owned())|" "$F"
+          sed -i "s|\"https://admin.rustdesk.com\"|\"${API}\"|g" src/common.rs
+          sed -i "s|fn get_api_server_(api: String, custom: String) -> String {|fn get_api_server_(api: String, custom: String) -> String { let _ = (api, custom); return \"${API}\".to_owned();|" src/common.rs
           grep -q "${SERVER}" "$F" || { echo "::error::server patch failed"; exit 1; }
+          grep -q 'RwLock::new("GateInDesk"' "$F" || { echo "::error::APP_NAME patch failed"; exit 1; }
+          grep -q "let _ = (api, custom); return \"${API}\"" src/common.rs || { echo "::error::api hardcode failed"; exit 1; }
+          echo "config.rs + common.rs fully patched"
 
       - name: Set GateInDesk version
         shell: bash
@@ -254,12 +262,23 @@ jobs:
           sed -i 's|"setup_server_tip", "For faster connection, please set up your own server"|"setup_server_tip", "Open your personal account"|' src/lang/en.rs
           sed -i 's|"setup_server_tip", "Для более быстрого подключения настройте собственный сервер."|"setup_server_tip", "Откройте личный кабинет"|' src/lang/ru.rs
 
+          # Dart URL sweep — special routes + docs + catch-all
           find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/privacy.html|https://gateindesk.azatmutq.com/privacy.html|g" {} +
           find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/download|https://download.azatmutq.com/gateindesk/|g" {} +
           find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/pricing|https://gateindesk.azatmutq.com/_admin/#/register|g" {} +
-          find flutter/lib -name '*.dart' -exec sed -i "s|'https://rustdesk.com'|'https://gateindesk.azatmutq.com'|g" {} +
-          find flutter/lib -name '*.dart' -exec sed -i "s|'https://rustdesk.com/'|'https://gateindesk.azatmutq.com/'|g" {} +
-          find flutter/lib -name '*.dart' -exec sed -i 's|"https://rustdesk.com"|"https://gateindesk.azatmutq.com"|g' {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/docs/[^\"')]*|https://gateindesk.azatmutq.com/guide/|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|rustdesk\.com|gateindesk.azatmutq.com|g" {} +
+          # Lang files: docs URLs + catch-all
+          find src/lang -name '*.rs' -exec sed -i "s|https://rustdesk.com/docs/[^\")]*|https://gateindesk.azatmutq.com/guide/|g" {} +
+          find src/lang -name '*.rs' -exec sed -i "s|rustdesk\.com|gateindesk.azatmutq.com|g" {} +
+          # ===== Linux-specific brand points =====
+          # APPLICATION_ID — GNOME/KDE system identifier
+          sed -i 's|set(APPLICATION_ID "com.carriez.flutter_hbb")|set(APPLICATION_ID "com.gateinweb.gateindesk")|' flutter/linux/CMakeLists.txt
+          # GTK window title + headerbar — visible in window decoration
+          sed -i 's|gtk_header_bar_set_title(header_bar, "rustdesk")|gtk_header_bar_set_title(header_bar, "GateInDesk")|' flutter/linux/my_application.cc
+          sed -i 's|gtk_window_set_title(window, "rustdesk")|gtk_window_set_title(window, "GateInDesk")|' flutter/linux/my_application.cc
+          # Icon theme lookup — match name we install to /usr/share/icons/.../gateindesk.png
+          sed -i 's|gtk_icon_theme_load_icon(theme, "rustdesk"|gtk_icon_theme_load_icon(theme, "gateindesk"|g' flutter/linux/my_application.cc
 
           sed -i 's|Purslane Ltd|GateInWeb|g' flutter/lib/desktop/pages/desktop_setting_page.dart
           sed -i 's|"Slogan_tip", "Made with heart in this chaotic world!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/en.rs
@@ -318,8 +337,29 @@ jobs:
           mkdir -p "$PKG_DIR/usr/bin" "$PKG_DIR/usr/share/applications"
           mkdir -p "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
           mkdir -p "$PKG_DIR/usr/share/${APP_NAME,,}"
+          mkdir -p "$PKG_DIR/usr/lib/${APP_NAME,,}"
 
-          cp ./target/release/rustdesk "$PKG_DIR/usr/bin/${APP_NAME,,}"
+          BUNDLE_DIR=./flutter/build/linux/x64/release/bundle
+          [ -d "$BUNDLE_DIR" ] || { echo "::error::Flutter bundle dir not found"; ls -la ./flutter/build/linux/ 2>&1 || true; exit 1; }
+          ls -la "$BUNDLE_DIR/"
+
+          # Robust binary lookup — BINARY_NAME in CMakeLists is still "rustdesk"
+          # in upstream, but stay tolerant if we patch it in the future.
+          BINARY=$(find "$BUNDLE_DIR" -maxdepth 1 -type f -executable | grep -vE '\.so$' | head -1)
+          [ -z "$BINARY" ] && { echo "::error::no executable in Flutter bundle"; exit 1; }
+          echo "Flutter binary: $BINARY"
+
+          cp -r "$BUNDLE_DIR/data" "$PKG_DIR/usr/lib/${APP_NAME,,}/data"
+          cp -r "$BUNDLE_DIR/lib"  "$PKG_DIR/usr/lib/${APP_NAME,,}/lib"
+          cp    "$BINARY"          "$PKG_DIR/usr/lib/${APP_NAME,,}/${APP_NAME,,}"
+          chmod 755 "$PKG_DIR/usr/lib/${APP_NAME,,}/${APP_NAME,,}"
+
+          cat > "$PKG_DIR/usr/bin/${APP_NAME,,}" <<WRAPPER_EOF
+          #!/bin/sh
+          DIR=/usr/lib/${APP_NAME,,}
+          export LD_LIBRARY_PATH="\$DIR/lib:\$LD_LIBRARY_PATH"
+          exec "\$DIR/${APP_NAME,,}" "\$@"
+          WRAPPER_EOF
           chmod 755 "$PKG_DIR/usr/bin/${APP_NAME,,}"
 
           cp /tmp/custom.txt "$PKG_DIR/usr/share/${APP_NAME,,}/custom.txt"
