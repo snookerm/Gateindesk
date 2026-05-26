@@ -195,14 +195,14 @@ jobs:
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
           RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
-          API_SERVER: ${{ secrets.API_SERVER }}
         run: |
           set -e
           cd rustdesk
           F=libs/hbb_common/src/config.rs
           SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
           PUBKEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
-          API=$(printf '%s' "$API_SERVER" | tr -d '[:space:]')
+          # API_SERVER is public (api.azatmutq.com) - no need for secret
+          API="https://api.azatmutq.com"
           sed -i "s|\"rs-ny.rustdesk.com\"|\"${SERVER}\"|g" "$F"
           sed -i "s|\"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\"|\"${PUBKEY}\"|g" "$F"
           # Force PROD_RENDEZVOUS_SERVER default. On Android custom.txt cannot
@@ -211,19 +211,14 @@ jobs:
           sed -i "s|PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(\"\".to_owned())|PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(\"${SERVER}\".to_owned())|" "$F"
           grep -q "PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(\"${SERVER}\"" "$F"             || { echo "::error::PROD_RENDEZVOUS_SERVER hardcode failed"; exit 1; }
           # Hardcode get_api_server_() to return our API directly,
-          # bypassing port-derivation (which would produce http://relay:21114
+          # bypassing port-derivation (which would form http://relay:21114
           # — wrong protocol/host for our HTTPS api on api.azatmutq.com).
-          if [ -n "$API" ]; then
-            sed -i "s|\"https://admin.rustdesk.com\"|\"${API}\"|g" src/common.rs
-            # Force early-return: rewrite the fn header so get_api_server_
-            # always returns $API and ignores params (suppress unused warnings).
-            sed -i "s|fn get_api_server_(api: String, custom: String) -> String {|fn get_api_server_(api: String, custom: String) -> String { let _ = (api, custom); return \"${API}\".to_owned();|" src/common.rs
-            grep -q "let _ = (api, custom); return \"${API}\"" src/common.rs               || { echo "::error::get_api_server_ early-return patch failed"; exit 1; }
-            echo "get_api_server_ hardcoded -> ${API}"
-          else
-            echo "::warning::API_SERVER secret empty - common.rs not patched (will fall back to formed http://relay:21114 which is wrong for us)"
-            exit 1
-          fi
+          sed -i "s|\"https://admin.rustdesk.com\"|\"${API}\"|g" src/common.rs
+          # Force early-return: rewrite fn header so get_api_server_
+          # always returns $API and ignores params (suppress unused warnings).
+          sed -i "s|fn get_api_server_(api: String, custom: String) -> String {|fn get_api_server_(api: String, custom: String) -> String { let _ = (api, custom); return \"${API}\".to_owned();|" src/common.rs
+          grep -q "let _ = (api, custom); return \"${API}\"" src/common.rs             || { echo "::error::get_api_server_ early-return patch failed"; exit 1; }
+          echo "get_api_server_ hardcoded -> ${API}"
           # Fallback APP_NAME — drives bind.mainGetAppNameSync() when
           # custom.txt isn't loaded. On Android, Rust load_custom_client()
           # looks for custom.txt at <exe_parent>/custom.txt which is
