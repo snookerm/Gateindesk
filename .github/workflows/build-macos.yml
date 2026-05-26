@@ -289,13 +289,15 @@ jobs:
           sed -i '' 's|"setup_server_tip", "For faster connection, please set up your own server"|"setup_server_tip", "Open your personal account"|' src/lang/en.rs
           sed -i '' 's|"setup_server_tip", "Для более быстрого подключения настройте собственный сервер."|"setup_server_tip", "Откройте личный кабинет"|' src/lang/ru.rs
 
-          # Global Dart URL sweep — covers EULA link in install_page + 4 other files.
+          # Global Dart URL sweep — wide catch-all:
+          # 1. Special routes first (download / privacy / pricing -> our own pages)
           find flutter/lib -name '*.dart' -exec sed -i '' "s|https://rustdesk.com/privacy.html|https://gateindesk.azatmutq.com/privacy.html|g" {} +
           find flutter/lib -name '*.dart' -exec sed -i '' "s|https://rustdesk.com/download|https://download.azatmutq.com/gateindesk/|g" {} +
           find flutter/lib -name '*.dart' -exec sed -i '' "s|https://rustdesk.com/pricing|https://gateindesk.azatmutq.com/_admin/#/register|g" {} +
-          find flutter/lib -name '*.dart' -exec sed -i '' "s|'https://rustdesk.com'|'https://gateindesk.azatmutq.com'|g" {} +
-          find flutter/lib -name '*.dart' -exec sed -i '' "s|'https://rustdesk.com/'|'https://gateindesk.azatmutq.com/'|g" {} +
-          find flutter/lib -name '*.dart' -exec sed -i '' 's|"https://rustdesk.com"|"https://gateindesk.azatmutq.com"|g' {} +
+          # 2. /docs/* -> our root (we do not host RustDesk docs)
+          find flutter/lib -name '*.dart' -exec sed -i '' "s|https://rustdesk.com/docs/[^\"'\)]*|https://gateindesk.azatmutq.com/|g" {} +
+          # 3. Generic catch-all — every remaining occurrence of rustdesk.com (URL host or plain display text)
+          find flutter/lib -name '*.dart' -exec sed -i '' "s|rustdesk\.com|gateindesk.azatmutq.com|g" {} +
 
           sed -i '' 's|Purslane Ltd|GateInWeb|g' flutter/lib/desktop/pages/desktop_setting_page.dart
 
