@@ -1,18 +1,14 @@
 name: Build Windows ARM64
 
 on:
+  # Auto-triggers disabled 2026-05-27 — see TODO_ON_DEMAND_BUILDS.md
+  # Run manually via Actions UI → Run workflow when ready.
   workflow_dispatch:
     inputs:
       upload-tag:
         description: 'Release tag (optional)'
         type: string
         default: ''
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/build-windows-arm64.yml'
-      - 'patches/branding.py'
-      - 'patches/branding/**'
 
 env:
   RUSTDESK_REV: "1.4.6"
