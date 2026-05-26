@@ -1,0 +1,477 @@
+name: Build Linux ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload-tag:
+        description: 'Release tag (optional)'
+        type: string
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-linux-arm64.yml'
+      - 'patches/branding.py'
+      - 'patches/branding/**'
+
+env:
+  RUSTDESK_REV: "1.4.6"
+  GD_VERSION: "1.0.7"
+  FLUTTER_VERSION: "3.29.0"
+  BRIDGE_FLUTTER_VERSION: "3.22.3"
+  RUST_VERSION: "1.75"
+  CARGO_EXPAND_VERSION: "1.0.95"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  APP_NAME: "GateInDesk"
+
+jobs:
+  generate-bridge:
+    name: Generate flutter-rust-bridge
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Clone upstream rustdesk + submodules
+        shell: bash
+        run: |
+          git clone --depth=1 --branch=${RUSTDESK_REV} https://github.com/rustdesk/rustdesk.git rustdesk
+          cd rustdesk
+          git submodule update --init --recursive --depth=1
+      - name: Install Linux prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang cmake curl gcc git g++ libclang-dev libgtk-3-dev llvm-dev nasm ninja-build pkg-config wget
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: bridge-ubuntu-22.04
+          workspaces: rustdesk
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.BRIDGE_FLUTTER_VERSION }}
+          cache: true
+      - name: Install flutter_rust_bridge_codegen
+        shell: bash
+        run: |
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
+          cd rustdesk/flutter
+          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' pubspec.yaml
+          flutter pub get
+      - name: Run flutter-rust-bridge codegen
+        shell: bash
+        run: |
+          cd rustdesk
+          ~/.cargo/bin/flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+      - name: Upload bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-artifact
+          path: |
+            rustdesk/src/bridge_generated.rs
+            rustdesk/src/bridge_generated.io.rs
+            rustdesk/flutter/lib/generated_bridge.dart
+            rustdesk/flutter/lib/generated_bridge.freezed.dart
+            rustdesk/flutter/macos/Runner/bridge_generated.h
+            rustdesk/flutter/ios/Runner/bridge_generated.h
+          retention-days: 1
+
+  build-linux:
+    name: GateInDesk Linux ${{ matrix.job.arch }} (DEB + AppImage)
+    needs: generate-bridge
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { arch: aarch64, target: aarch64-unknown-linux-gnu, deb_arch: arm64, vcpkg: arm64-linux, runner: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.job.runner }}
+    timeout-minutes: 150
+    permissions:
+      contents: write
+
+    steps:
+      - name: Validate secrets
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          missing=0
+          [ -z "$RENDEZVOUS_SERVER" ] && { echo "::error::RENDEZVOUS_SERVER not set"; missing=1; }
+          [ -z "$RS_PUB_KEY" ] && { echo "::error::RS_PUB_KEY not set"; missing=1; }
+          [ "$missing" = "1" ] && exit 1
+          echo "all required secrets present"
+
+      - name: Maximize build space
+        run: |
+          sudo rm -rf /opt/ghc /usr/local/lib/android /usr/share/dotnet
+          df -h
+
+      - name: Checkout meta-repo
+        uses: actions/checkout@v4
+        with:
+          path: meta
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          # libunwind-dev: libgstreamer1.0-dev depends on it on ubuntu-22.04
+          # (not pulled in automatically — apt held packages without it).
+          # Dropped fuse + libfuse2: conflict with fuse3 default; appimagetool
+          # uses --appimage-extract-and-run instead of needing FUSE.
+          sudo apt-get install -y \
+            build-essential clang cmake curl gcc git g++ \
+            libayatana-appindicator3-dev libasound2-dev libclang-dev \
+            libunwind-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgtk-3-dev libpam0g-dev libpulse-dev libva-dev \
+            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxdo-dev libxfixes-dev llvm-dev nasm ninja-build pkg-config \
+            tree wget imagemagick dpkg-dev
+
+      - name: Clone upstream rustdesk + submodules
+        shell: bash
+        run: |
+          git clone --depth=1 --branch=${RUSTDESK_REV} https://github.com/rustdesk/rustdesk.git rustdesk
+          cd rustdesk
+          git submodule update --init --recursive --depth=1
+
+      - name: Restore flutter-rust-bridge artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: rustdesk/
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.job.target }}
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: linux-gateindesk-${{ matrix.job.arch }}
+          workspaces: rustdesk
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          if ! "$VCPKG_ROOT/vcpkg" install --triplet ${{ matrix.job.vcpkg }} --x-install-root="$VCPKG_ROOT/installed"; then
+            find "$VCPKG_ROOT/" -name "*.log" | head -10 | while read -r f; do
+              echo "=== $f ==="; cat "$f"
+            done
+            exit 1
+          fi
+
+      - name: Patch config.rs fallback constants + APP_NAME default + api hardcode
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          set -e
+          cd rustdesk
+          F=libs/hbb_common/src/config.rs
+          SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
+          PUBKEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
+          API="https://api.azatmutq.com"
+          sed -i "s|\"rs-ny.rustdesk.com\"|\"${SERVER}\"|g" "$F"
+          sed -i "s|\"OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=\"|\"${PUBKEY}\"|g" "$F"
+          sed -i 's|RwLock::new("RustDesk".to_owned())|RwLock::new("GateInDesk".to_owned())|' "$F"
+          sed -i "s|PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(\"\".to_owned())|PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(\"${SERVER}\".to_owned())|" "$F"
+          sed -i "s|\"https://admin.rustdesk.com\"|\"${API}\"|g" src/common.rs
+          sed -i "s|fn get_api_server_(api: String, custom: String) -> String {|fn get_api_server_(api: String, custom: String) -> String { let _ = (api, custom); return \"${API}\".to_owned();|" src/common.rs
+          grep -q "${SERVER}" "$F" || { echo "::error::server patch failed"; exit 1; }
+          grep -q 'RwLock::new("GateInDesk"' "$F" || { echo "::error::APP_NAME patch failed"; exit 1; }
+          grep -q "let _ = (api, custom); return \"${API}\"" src/common.rs || { echo "::error::api hardcode failed"; exit 1; }
+          echo "config.rs + common.rs fully patched"
+
+      - name: Set GateInDesk version
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          sed -i 's|^version = "1.4.6"|version = "${{ env.GD_VERSION }}"|' Cargo.toml
+          if grep -qE '^version: ' flutter/pubspec.yaml; then
+            sed -i 's|^version: .*|version: ${{ env.GD_VERSION }}+${{ github.run_number }}|' flutter/pubspec.yaml
+          else
+            echo "version: ${{ env.GD_VERSION }}+${{ github.run_number }}" >> flutter/pubspec.yaml
+          fi
+
+      - name: Patch common.rs (signature verify)
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          F=src/common.rs
+          sed -i 's|let Ok(data) = sign::verify(&data, \&pk) else {|let _ = pk; let data = data; if false {|' "$F"
+
+      - name: Install GateInDesk branding
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+          cp ../meta/patches/branding/logo.png flutter/assets/logo.png
+          cp ../meta/patches/branding/icon.svg flutter/assets/icon.svg
+          cp ../meta/patches/branding/icon.ico res/icon.ico 2>/dev/null || true
+          PNG="../meta/patches/branding/logo.png"
+          if [ -f res/128x128.png ]; then
+            convert "$PNG" -resize 128x128 res/128x128.png
+          fi
+          if [ -f res/32x32.png ]; then
+            convert "$PNG" -resize 32x32 res/32x32.png
+          fi
+
+      - name: Apply branding patches
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+
+          sed -i 's|"powered_by_me", "Powered by RustDesk"|"powered_by_me", "Powered by GateInDesk"|' src/lang/en.rs
+          sed -i 's|"powered_by_me", "Основано на RustDesk"|"powered_by_me", "Работает на GateInDesk"|' src/lang/ru.rs
+          sed -i 's|https://api.rustdesk.com/version/latest|https://api.azatmutq.com/api/version/latest|' libs/hbb_common/src/lib.rs
+          sed -i 's|"setup_server_tip", "For faster connection, please set up your own server"|"setup_server_tip", "Open your personal account"|' src/lang/en.rs
+          sed -i 's|"setup_server_tip", "Для более быстрого подключения настройте собственный сервер."|"setup_server_tip", "Откройте личный кабинет"|' src/lang/ru.rs
+
+          # Dart URL sweep — special routes + docs + catch-all
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/privacy.html|https://gateindesk.azatmutq.com/privacy.html|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/download|https://download.azatmutq.com/gateindesk/|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/pricing|https://gateindesk.azatmutq.com/_admin/#/register|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|https://rustdesk.com/docs/[^\"')]*|https://gateindesk.azatmutq.com/guide/|g" {} +
+          find flutter/lib -name '*.dart' -exec sed -i "s|rustdesk\.com|gateindesk.azatmutq.com|g" {} +
+          # Lang files: docs URLs + catch-all
+          find src/lang -name '*.rs' -exec sed -i "s|https://rustdesk.com/docs/[^\")]*|https://gateindesk.azatmutq.com/guide/|g" {} +
+          find src/lang -name '*.rs' -exec sed -i "s|rustdesk\.com|gateindesk.azatmutq.com|g" {} +
+          # ===== Linux-specific brand points =====
+          # APPLICATION_ID — GNOME/KDE system identifier
+          sed -i 's|set(APPLICATION_ID "com.carriez.flutter_hbb")|set(APPLICATION_ID "com.gateinweb.gateindesk")|' flutter/linux/CMakeLists.txt
+          # GTK window title + headerbar — visible in window decoration
+          sed -i 's|gtk_header_bar_set_title(header_bar, "rustdesk")|gtk_header_bar_set_title(header_bar, "GateInDesk")|' flutter/linux/my_application.cc
+          sed -i 's|gtk_window_set_title(window, "rustdesk")|gtk_window_set_title(window, "GateInDesk")|' flutter/linux/my_application.cc
+          # Icon theme lookup — match name we install to /usr/share/icons/.../gateindesk.png
+          sed -i 's|gtk_icon_theme_load_icon(theme, "rustdesk"|gtk_icon_theme_load_icon(theme, "gateindesk"|g' flutter/linux/my_application.cc
+
+          sed -i 's|Purslane Ltd|GateInWeb|g' flutter/lib/desktop/pages/desktop_setting_page.dart
+          sed -i 's|"Slogan_tip", "Made with heart in this chaotic world!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/en.rs
+          sed -i 's|"Slogan_tip", "Сделано с душой в этом безумном мире!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/ru.rs
+
+          python3 ../meta/patches/branding.py
+          echo "branding patches applied"
+
+      - name: Build RustDesk Linux (build.py)
+        shell: bash
+        env:
+          VCPKG_ROOT: /opt/artifacts/vcpkg
+        run: |
+          set -e
+          cd rustdesk
+          sed -i 's/\["cdylib", "staticlib", "rlib"\]/\["cdylib"\]/g' Cargo.toml
+          python3 ./build.py --flutter --hwcodec --unix-file-copy-paste
+          ls -la ./target/release/rustdesk 2>&1 || echo "binary missing"
+
+      - name: Inject custom.txt + create DEB package
+        shell: bash
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          set -e
+          cd rustdesk
+          mkdir -p SignOutput
+
+          SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
+          KEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
+          python3 -c "
+          import json, base64
+          cfg = {
+              'app-name': '${APP_NAME}',
+              'override-settings': {
+                  'custom-rendezvous-server': '${SERVER}',
+                  'relay-server': '${SERVER}:21117',
+                  'api-server': 'https://api.azatmutq.com',
+                  'key': '${KEY}',
+                  'hide-server-settings': 'Y',
+              },
+              'default-settings': {
+                  'allow-remote-config-modification': 'Y',
+                  'enable-check-update': 'Y',
+              },
+          }
+          enc = base64.b64encode(json.dumps(cfg).encode()).decode()
+          open('/tmp/custom.txt', 'w').write(enc)
+          print(f'custom.txt: {len(enc)} bytes')
+          "
+
+          PKG_DIR=/tmp/gateindesk-deb
+          rm -rf "$PKG_DIR"
+          mkdir -p "$PKG_DIR/DEBIAN"
+          mkdir -p "$PKG_DIR/usr/bin" "$PKG_DIR/usr/share/applications"
+          mkdir -p "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
+          mkdir -p "$PKG_DIR/usr/share/${APP_NAME,,}"
+          mkdir -p "$PKG_DIR/usr/lib/${APP_NAME,,}"
+
+          BUNDLE_DIR=./flutter/build/linux/arm64/release/bundle
+          [ -d "$BUNDLE_DIR" ] || { echo "::error::Flutter bundle dir not found"; ls -la ./flutter/build/linux/ 2>&1 || true; exit 1; }
+          ls -la "$BUNDLE_DIR/"
+
+          # Robust binary lookup — BINARY_NAME in CMakeLists is still "rustdesk"
+          # in upstream, but stay tolerant if we patch it in the future.
+          BINARY=$(find "$BUNDLE_DIR" -maxdepth 1 -type f -executable | grep -vE '\.so$' | head -1)
+          [ -z "$BINARY" ] && { echo "::error::no executable in Flutter bundle"; exit 1; }
+          echo "Flutter binary: $BINARY"
+
+          cp -r "$BUNDLE_DIR/data" "$PKG_DIR/usr/lib/${APP_NAME,,}/data"
+          cp -r "$BUNDLE_DIR/lib"  "$PKG_DIR/usr/lib/${APP_NAME,,}/lib"
+          cp    "$BINARY"          "$PKG_DIR/usr/lib/${APP_NAME,,}/${APP_NAME,,}"
+          chmod 755 "$PKG_DIR/usr/lib/${APP_NAME,,}/${APP_NAME,,}"
+
+          cat > "$PKG_DIR/usr/bin/${APP_NAME,,}" <<WRAPPER_EOF
+          #!/bin/sh
+          DIR=/usr/lib/${APP_NAME,,}
+          export LD_LIBRARY_PATH="\$DIR/lib:\$LD_LIBRARY_PATH"
+          exec "\$DIR/${APP_NAME,,}" "\$@"
+          WRAPPER_EOF
+          chmod 755 "$PKG_DIR/usr/bin/${APP_NAME,,}"
+
+          cp /tmp/custom.txt "$PKG_DIR/usr/share/${APP_NAME,,}/custom.txt"
+
+          convert ../meta/patches/branding/logo.png -resize 256x256 \
+            "$PKG_DIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME,,}.png"
+
+          cat > "$PKG_DIR/usr/share/applications/${APP_NAME,,}.desktop" <<EOF
+          [Desktop Entry]
+          Name=${APP_NAME}
+          Comment=Безопасный удалённый доступ
+          Exec=/usr/bin/${APP_NAME,,}
+          Icon=${APP_NAME,,}
+          Terminal=false
+          Type=Application
+          Categories=Network;RemoteAccess;
+          StartupNotify=true
+          EOF
+
+          cat > "$PKG_DIR/DEBIAN/control" <<EOF
+          Package: ${APP_NAME,,}
+          Version: ${GD_VERSION}
+          Section: net
+          Priority: optional
+          Architecture: ${{ matrix.job.deb_arch }}
+          Depends: libgtk-3-0, libxcb-randr0, libxcb-xfixes0, libxcb-shape0, libxdo3, libxfixes3, libayatana-appindicator3-1, libpam0g, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libpulse0, libva-drm2, libva-x11-2
+          Maintainer: GateInWeb <support@gateinweb.ru>
+          Homepage: https://gateindesk.azatmutq.com
+          Description: ${APP_NAME} - secure remote desktop access
+           ${APP_NAME} is a self-hosted RustDesk-based remote support
+           solution with branded UI and integrated billing.
+          EOF
+
+          DEB_OUT="SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.deb"
+          dpkg-deb --build --root-owner-group "$PKG_DIR" "$DEB_OUT"
+          ls -la "$DEB_OUT"
+          dpkg-deb --info "$DEB_OUT"
+
+      - name: Build AppImage (without FUSE — extract-and-run mode)
+        shell: bash
+        run: |
+          set -e
+          cd rustdesk
+
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage
+          chmod +x appimagetool-aarch64.AppImage
+
+          APPDIR=/tmp/AppDir
+          rm -rf "$APPDIR"
+          mkdir -p "$APPDIR"
+          dpkg-deb -x SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.deb "$APPDIR"
+
+          cat > "$APPDIR/AppRun" <<EOF
+          #!/bin/bash
+          HERE="\$(dirname "\$(readlink -f "\$0")")"
+          export LD_LIBRARY_PATH="\$HERE/usr/lib:\$LD_LIBRARY_PATH"
+          exec "\$HERE/usr/bin/${APP_NAME,,}" "\$@"
+          EOF
+          chmod +x "$APPDIR/AppRun"
+
+          cp "$APPDIR/usr/share/applications/${APP_NAME,,}.desktop" "$APPDIR/"
+          cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME,,}.png" "$APPDIR/${APP_NAME,,}.png"
+          cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME,,}.png" "$APPDIR/.DirIcon"
+
+          ARCH=aarch64 ./appimagetool-aarch64.AppImage --appimage-extract-and-run --no-appstream "$APPDIR" \
+            "SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.AppImage"
+          chmod +x "SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.AppImage"
+          ls -la SignOutput/
+
+      - name: Compute SHA256
+        shell: bash
+        run: |
+          cd rustdesk/SignOutput
+          sha256sum *.deb *.AppImage > SHA256SUMS-${{ matrix.job.arch }}
+          cat SHA256SUMS-${{ matrix.job.arch }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateindesk-linux-${{ matrix.job.arch }}
+          path: rustdesk/SignOutput/
+          retention-days: 30
+
+      - name: Publish to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.upload-tag || env.GD_VERSION }}
+          prerelease: false
+          files: rustdesk/SignOutput/*
+
+      - name: Deploy to VPS
+        if: env.VPS_KEY != ''
+        env:
+          VPS_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: claude-relay@78.24.218.158
+          VPS_PORT: 22
+        shell: bash
+        run: |
+          set -e
+          mkdir -p ~/.ssh
+          echo "$VPS_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${VPS_PORT} -H 78.24.218.158 >> ~/.ssh/known_hosts 2>/dev/null
+
+          DEB="rustdesk/SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.deb"
+          APPIMAGE="rustdesk/SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.AppImage"
+          INSTALLER_DIR="/opt/mirrors/gateindesk/v${GD_VERSION}"
+
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST "sudo mkdir -p $INSTALLER_DIR && sudo chown -R claude-relay:claude-relay $INSTALLER_DIR"
+          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$DEB"      "$VPS_HOST:$INSTALLER_DIR/"
+          scp -i ~/.ssh/deploy_key -P $VPS_PORT "$APPIMAGE" "$VPS_HOST:$INSTALLER_DIR/"
+          ssh -i ~/.ssh/deploy_key -p $VPS_PORT $VPS_HOST \
+            "sudo chown www-data:www-data $INSTALLER_DIR/*.deb $INSTALLER_DIR/*.AppImage && \
+             sudo chmod 644 $INSTALLER_DIR/*.deb $INSTALLER_DIR/*.AppImage"
+          echo "deploy OK: Linux ${{ matrix.job.arch }} DEB + AppImage at /v${GD_VERSION}/"
