@@ -95,8 +95,7 @@ jobs:
       fail-fast: false
       matrix:
         job:
-          - { arch: x86_64,  target: x86_64-unknown-linux-gnu,  deb_arch: amd64, vcpkg: x64-linux,   runner: ubuntu-22.04,     flutter_arch: x64,   appimage_arch: x86_64  }
-          - { arch: aarch64, target: aarch64-unknown-linux-gnu, deb_arch: arm64, vcpkg: arm64-linux, runner: ubuntu-22.04-arm, flutter_arch: arm64, appimage_arch: aarch64 }
+          - { arch: x86_64, target: x86_64-unknown-linux-gnu, deb_arch: amd64, vcpkg: x64-linux, runner: ubuntu-22.04 }
     runs-on: ${{ matrix.job.runner }}
     timeout-minutes: 150
     permissions:
@@ -340,7 +339,7 @@ jobs:
           mkdir -p "$PKG_DIR/usr/share/${APP_NAME,,}"
           mkdir -p "$PKG_DIR/usr/lib/${APP_NAME,,}"
 
-          BUNDLE_DIR=./flutter/build/linux/${{ matrix.job.flutter_arch }}/release/bundle
+          BUNDLE_DIR=./flutter/build/linux/x64/release/bundle
           [ -d "$BUNDLE_DIR" ] || { echo "::error::Flutter bundle dir not found"; ls -la ./flutter/build/linux/ 2>&1 || true; exit 1; }
           ls -la "$BUNDLE_DIR/"
 
@@ -405,8 +404,8 @@ jobs:
           set -e
           cd rustdesk
 
-          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${{ matrix.job.appimage_arch }}.AppImage
-          chmod +x appimagetool-${{ matrix.job.appimage_arch }}.AppImage
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
 
           APPDIR=/tmp/AppDir
           rm -rf "$APPDIR"
@@ -425,7 +424,7 @@ jobs:
           cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME,,}.png" "$APPDIR/${APP_NAME,,}.png"
           cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME,,}.png" "$APPDIR/.DirIcon"
 
-          ARCH=${{ matrix.job.appimage_arch }} ./appimagetool-${{ matrix.job.appimage_arch }}.AppImage --appimage-extract-and-run --no-appstream "$APPDIR" \
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run --no-appstream "$APPDIR" \
             "SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.AppImage"
           chmod +x "SignOutput/${APP_NAME}-${GD_VERSION}-${{ matrix.job.arch }}.AppImage"
           ls -la SignOutput/
