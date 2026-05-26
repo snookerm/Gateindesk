@@ -311,6 +311,11 @@ jobs:
 
           sed -i '' 's|Purslane Ltd|GateInWeb|g' flutter/lib/desktop/pages/desktop_setting_page.dart
 
+          # Lang files URL sweep — RustDesk has docs URLs (e.g. doc_mac_permission)
+          # hardcoded in src/lang/*.rs that the Dart UI launchUrls.
+          find src/lang -name '*.rs' -exec sed -i '' "s|https://rustdesk.com/docs/[^\")]*|https://gateindesk.azatmutq.com/guide/|g" {} +
+          find src/lang -name '*.rs' -exec sed -i '' "s|rustdesk\.com|gateindesk.azatmutq.com|g" {} +
+
           sed -i '' 's|"Slogan_tip", "Made with heart in this chaotic world!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/en.rs
           sed -i '' 's|"Slogan_tip", "Сделано с душой в этом безумном мире!"|"Slogan_tip", "Безопасный удалённый доступ"|' src/lang/ru.rs
 
