@@ -15,6 +15,7 @@ on:
       - 'patches/branding/**'
 
 env:
+  # force re-trigger
   RUSTDESK_REV: "1.4.6"
   # Pin to the same GD_VERSION as Windows pipeline. Bump in build-windows.yml,
   # this workflow follows. Filename: GateInDesk-{V}-{arch}.dmg.
