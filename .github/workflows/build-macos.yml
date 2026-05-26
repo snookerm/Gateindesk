@@ -343,7 +343,7 @@ jobs:
           cd rustdesk
           ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.job.extra }}
 
-      - name: Rename RustDesk.app → GateInDesk.app + inject custom.txt
+      - name: Rename app, patch bundle Info.plist, inject custom.txt, re-codesign
         shell: bash
         env:
           RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
@@ -359,6 +359,26 @@ jobs:
           fi
           [ -d "$DST_APP" ] || { echo "::error::no .app bundle found"; exit 1; }
 
+          # (1) Rename main executable: Contents/MacOS/RustDesk -> GateInDesk
+          if [ -f "$DST_APP/Contents/MacOS/RustDesk" ]; then
+            mv "$DST_APP/Contents/MacOS/RustDesk" "$DST_APP/Contents/MacOS/${APP_NAME}"
+            echo "renamed binary: RustDesk -> ${APP_NAME}"
+          fi
+
+          # (2) Patch bundle Info.plist: CFBundleExecutable + CFBundleIdentifier
+          # + CFBundleName + CFBundleDisplayName. The template patch in earlier
+          # step touches flutter/macos/Runner/Info.plist (source), but Flutter
+          # may regenerate or override values during build — re-apply here on
+          # the actual built bundle to be safe.
+          PLIST="$DST_APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable ${APP_NAME}" "$PLIST" 2>/dev/null ||             /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string ${APP_NAME}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${{ env.BUNDLE_ID }}" "$PLIST" 2>/dev/null ||             /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${{ env.BUNDLE_ID }}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName ${APP_NAME}" "$PLIST" 2>/dev/null ||             /usr/libexec/PlistBuddy -c "Add :CFBundleName string ${APP_NAME}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ${APP_NAME}" "$PLIST" 2>/dev/null ||             /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ${APP_NAME}" "$PLIST"
+          echo "=== bundle Info.plist after patch ==="
+          /usr/libexec/PlistBuddy -c "Print" "$PLIST" | grep -E "CFBundle(Executable|Identifier|Name|DisplayName)" || true
+
+          # (3) Inject custom.txt with our server config
           SERVER=$(printf '%s' "$RENDEZVOUS_SERVER" | tr -d '[:space:]')
           KEY=$(printf '%s' "$RS_PUB_KEY" | tr -d '[:space:]')
           python3 -c "
@@ -381,8 +401,19 @@ jobs:
           open('$DST_APP/Contents/Resources/custom.txt', 'w').write(enc)
           print(f'custom.txt: {len(enc)} bytes (base64)')
           "
+
+          # (4) Re-codesign ad-hoc AFTER all modifications. Without this,
+          # Gatekeeper sees hash mismatches (custom.txt added after Flutter
+          # auto-sign, binary renamed, Info.plist mutated) and shows
+          # "приложение повреждено" instead of opening.
+          # Remove old signature first to ensure clean re-sign of the whole bundle.
+          codesign --remove-signature "$DST_APP" 2>/dev/null || true
+          codesign --force --deep --sign - "$DST_APP"
+          echo "=== final codesign ==="
+          codesign -dv "$DST_APP" 2>&1 | head -10
+
           ls -la "$DST_APP/Contents/Resources/custom.txt"
-          echo "=== final app bundle ==="
+          echo "=== final app bundle structure ==="
           ls -la "$DST_APP/Contents/MacOS/"
 
       - name: Create unsigned DMG
